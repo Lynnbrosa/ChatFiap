@@ -1,13 +1,17 @@
-import React from 'react';
-import { NavigationContainer, DefaultTheme } from '@react-navigation/native';
+import React, { useState } from 'react';
+import {
+  NavigationContainer,
+  DefaultTheme,
+  useNavigationContainerRef,
+} from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { StatusBar } from 'expo-status-bar';
 import { RootStackParamList } from '../types/navigation';
 import { useAuth } from '../hooks/useAuth';
+import { useNotificationNavigation } from '../hooks/useNotifications';
 import { colors } from '../theme/colors';
 import { Loading } from '../components/Loading';
 
-// Telas
 import { LoginScreen } from '../screens/LoginScreen';
 import { RegisterScreen } from '../screens/RegisterScreen';
 import { ConversationsScreen } from '../screens/ConversationsScreen';
@@ -19,7 +23,7 @@ import { GroupMembersScreen } from '../screens/GroupMembersScreen';
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
-const darkNavigationTheme = {
+const navigationTheme = {
   ...DefaultTheme,
   colors: {
     ...DefaultTheme.colors,
@@ -32,64 +36,58 @@ const darkNavigationTheme = {
 };
 
 export const AppNavigator: React.FC = () => {
-  const { firebaseUser, loading } = useAuth();
+  const { initializing, isAuthenticated } = useAuth();
+  const navigationRef = useNavigationContainerRef<RootStackParamList>();
+  const [navigationReady, setNavigationReady] = useState<boolean>(false);
 
-  if (loading) {
-    return <Loading message="Inicializando sessão..." fullscreen />;
+  // Toque na notificação → abre a conversa (inclusive com o app fechado)
+  useNotificationNavigation(navigationRef, navigationReady, isAuthenticated);
+
+  // Só a recuperação inicial da sessão ocupa a tela inteira. Login/cadastro mostram o
+  // loading no próprio botão, para não desmontar o formulário nem perder mensagens de erro.
+  if (initializing) {
+    return <Loading message="Recuperando sessão..." fullscreen />;
   }
 
   return (
-    <NavigationContainer theme={darkNavigationTheme}>
+    <NavigationContainer
+      ref={navigationRef}
+      theme={navigationTheme}
+      onReady={() => setNavigationReady(true)}
+    >
       <StatusBar style="light" />
       <Stack.Navigator
         screenOptions={{
-          headerStyle: {
-            backgroundColor: colors.surface,
-          },
+          headerStyle: { backgroundColor: colors.surface },
           headerTintColor: colors.textPrimary,
-          headerTitleStyle: {
-            fontWeight: '700',
-          },
-          contentStyle: {
-            backgroundColor: colors.background,
-          },
+          headerTitleStyle: { fontWeight: '700' },
+          contentStyle: { backgroundColor: colors.background },
         }}
       >
-        {firebaseUser ? (
-          // Fluxo Autenticado
+        {isAuthenticated ? (
           <>
             <Stack.Screen
               name="Conversations"
               component={ConversationsScreen}
               options={{ headerShown: false }}
             />
-            <Stack.Screen
-              name="Chat"
-              component={ChatScreen}
-              options={{ headerShown: false }}
-            />
+            <Stack.Screen name="Chat" component={ChatScreen} options={{ headerShown: false }} />
             <Stack.Screen
               name="Users"
               component={UsersScreen}
               options={({ route }) => ({
                 title:
-                  route.params?.mode === 'group_select'
-                    ? 'Selecionar Integrantes'
-                    : 'Nova Conversa',
+                  route.params.mode === 'group_select' ? 'Selecionar integrantes' : 'Nova conversa',
               })}
             />
             <Stack.Screen
               name="GroupForm"
               component={GroupFormScreen}
-              options={{
-                title: 'Configurações de Grupo',
-              }}
+              options={({ route }) => ({
+                title: route.params?.groupId ? 'Configurações do grupo' : 'Novo grupo',
+              })}
             />
-            <Stack.Screen
-              name="Profile"
-              component={ProfileScreen}
-              options={{ headerShown: false }}
-            />
+            <Stack.Screen name="Profile" component={ProfileScreen} options={{ headerShown: false }} />
             <Stack.Screen
               name="GroupMembers"
               component={GroupMembersScreen}
@@ -97,13 +95,8 @@ export const AppNavigator: React.FC = () => {
             />
           </>
         ) : (
-          // Fluxo de Autenticação
           <>
-            <Stack.Screen
-              name="Login"
-              component={LoginScreen}
-              options={{ headerShown: false }}
-            />
+            <Stack.Screen name="Login" component={LoginScreen} options={{ headerShown: false }} />
             <Stack.Screen
               name="Register"
               component={RegisterScreen}

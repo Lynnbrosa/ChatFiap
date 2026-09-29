@@ -1,3 +1,5 @@
+export type ConversationType = 'direct' | 'group';
+
 export type MessageTarget =
   | { type: 'conversation' }
   | { type: 'member'; memberId: string };
@@ -5,7 +7,7 @@ export type MessageTarget =
 export type ChatMessage = {
   id: string;
   conversationId: string;
-  conversationType: 'direct' | 'group';
+  conversationType: ConversationType;
   senderId: string;
   senderName?: string;
   text: string;
@@ -23,3 +25,6 @@ export type DirectConversation = {
   lastMessage?: string;
   lastMessageAt?: number;
 };
+
+/** Limite de caracteres de uma mensagem (validado também nas regras do Realtime Database). */
+export const MAX_MESSAGE_LENGTH = 1000;

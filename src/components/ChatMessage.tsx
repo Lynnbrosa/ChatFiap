@@ -9,6 +9,10 @@ interface ChatMessageProps {
   isOwn: boolean;
   isGroup: boolean;
   currentUserId: string;
+  /** Nome atual do autor (perfil público); usa o nome gravado na mensagem como reserva. */
+  authorName?: string;
+  /** Nome do integrante a quem a mensagem foi direcionada. */
+  targetName?: string;
 }
 
 export const ChatMessage: React.FC<ChatMessageProps> = ({
@@ -16,6 +20,8 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
   isOwn,
   isGroup,
   currentUserId,
+  authorName,
+  targetName,
 }) => {
   const isDirectTarget =
     message.target &&
@@ -42,14 +48,16 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
       >
         {/* Nome do autor nas conversas de grupo (apenas mensagens de outros) */}
         {isGroup && !isOwn && (
-          <Text style={styles.senderName}>{message.senderName || 'Integrante'}</Text>
+          <Text style={styles.senderName}>{authorName || message.senderName || 'Integrante'}</Text>
         )}
 
         {/* Indicador de mensagem direcionada a um integrante */}
         {message.target && message.target.type === 'member' && (
           <View style={styles.targetBadge}>
             <Text style={styles.targetBadgeText}>
-              {isDirectTarget ? '📌 Direcionada a você' : '📌 Mensagem direcionada'}
+              {isDirectTarget
+                ? '📌 Direcionada a você'
+                : `📌 Para ${targetName ?? 'um integrante'}`}
             </Text>
           </View>
         )}

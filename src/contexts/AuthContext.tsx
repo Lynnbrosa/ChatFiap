@@ -4,6 +4,7 @@ import React, {
   useEffect,
   useCallback,
   useMemo,
+  useRef,
   ReactNode,
 } from 'react';
 import { User } from 'firebase/auth';
@@ -15,18 +16,25 @@ import {
   onAuthStateChangedListener,
   RegisterParams,
 } from '../services/authService';
-import { getUserProfile } from '../services/userService';
+import { getOwnProfile } from '../services/userService';
+import { getFriendlyErrorMessage } from '../utils/errors';
 
 export interface AuthContextType {
   user: ChatUser | null;
   firebaseUser: User | null;
-  loading: boolean;
+  /** true só durante a recuperação inicial da sessão. */
+  initializing: boolean;
+  /** true enquanto login, cadastro ou logout estão em andamento. */
+  actionLoading: boolean;
+  isAuthenticated: boolean;
   authError: string | null;
-  login: (email: string, pass: string) => Promise<void>;
-  register: (params: RegisterParams) => Promise<void>;
+  authNotice: string | null;
+  login: (email: string, password: string) => Promise<boolean>;
+  register: (params: RegisterParams) => Promise<boolean>;
   logout: () => Promise<void>;
   refreshProfile: () => Promise<void>;
   clearError: () => void;
+  clearNotice: () => void;
 }
 
 export const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -38,102 +46,144 @@ interface AuthProviderProps {
 export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
   const [user, setUser] = useState<ChatUser | null>(null);
-  const [loading, setLoading] = useState<boolean>(true);
+  const [initializing, setInitializing] = useState<boolean>(true);
+  const [actionLoading, setActionLoading] = useState<boolean>(false);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [authNotice, setAuthNotice] = useState<string | null>(null);
 
-  const clearError = useCallback(() => {
-    setAuthError(null);
-  }, []);
+  // Evita que o listener de sessão sobrescreva o perfil enquanto o cadastro ainda o está gravando
+  const registeringRef = useRef<boolean>(false);
+  // Distingue logout voluntário de sessão encerrada/expirada
+  const explicitLogoutRef = useRef<boolean>(false);
+  const hadSessionRef = useRef<boolean>(false);
 
-  const refreshProfile = useCallback(async () => {
-    if (!firebaseUser) {
-      setUser(null);
-      return;
-    }
-    try {
-      const profile = await getUserProfile(firebaseUser.uid);
-      setUser(profile);
-    } catch (err) {
-      console.error('[AuthContext] Falha ao recarregar perfil:', err);
-    }
-  }, [firebaseUser]);
+  const clearError = useCallback(() => setAuthError(null), []);
+  const clearNotice = useCallback(() => setAuthNotice(null), []);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChangedListener(async (fbUser) => {
       setFirebaseUser(fbUser);
-      if (fbUser) {
-        try {
-          const profile = await getUserProfile(fbUser.uid);
-          setUser(profile);
-        } catch (err) {
-          console.error('[AuthContext] Falha ao buscar perfil da sessão:', err);
+
+      if (!fbUser) {
+        if (hadSessionRef.current && !explicitLogoutRef.current) {
+          setAuthError('Sua sessão expirou. Entre novamente.');
         }
-      } else {
+        hadSessionRef.current = false;
+        explicitLogoutRef.current = false;
         setUser(null);
+        setInitializing(false);
+        return;
       }
-      setLoading(false);
+
+      hadSessionRef.current = true;
+      if (registeringRef.current) {
+        setInitializing(false);
+        return;
+      }
+
+      try {
+        const profile = await getOwnProfile(fbUser.uid);
+        setUser(profile);
+      } catch (err) {
+        console.error('[AuthContext] Falha ao carregar o perfil da sessão:', err);
+        setAuthError(getFriendlyErrorMessage(err, 'Não foi possível carregar seu perfil.'));
+      } finally {
+        setInitializing(false);
+      }
     });
 
-    return () => unsubscribe();
+    return unsubscribe;
   }, []);
 
-  const login = useCallback(async (email: string, pass: string) => {
-    setLoading(true);
+  const refreshProfile = useCallback(async () => {
+    if (!firebaseUser) return;
+    try {
+      setUser(await getOwnProfile(firebaseUser.uid));
+    } catch (err) {
+      console.error('[AuthContext] Falha ao recarregar o perfil:', err);
+    }
+  }, [firebaseUser]);
+
+  const login = useCallback(async (email: string, password: string): Promise<boolean> => {
+    setActionLoading(true);
     setAuthError(null);
     try {
-      const result = await loginUser(email, pass);
-      setFirebaseUser(result.firebaseUser);
-      setUser(result.profile);
+      const profile = await loginUser(email, password);
+      setUser(profile);
+      return true;
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Falha na autenticação';
-      setAuthError(msg);
-      throw err;
+      setAuthError(getFriendlyErrorMessage(err, 'Não foi possível entrar. Tente novamente.'));
+      return false;
     } finally {
-      setLoading(false);
+      setActionLoading(false);
     }
   }, []);
 
-  const register = useCallback(async (params: RegisterParams) => {
-    setLoading(true);
+  const register = useCallback(async (params: RegisterParams): Promise<boolean> => {
+    setActionLoading(true);
     setAuthError(null);
+    registeringRef.current = true;
     try {
-      const newUser = await registerUser(params);
-      setUser(newUser);
+      const result = await registerUser(params);
+      setUser(result.user);
+      if (result.photoUploadFailed) {
+        setAuthNotice('Conta criada, mas a foto de perfil não pôde ser enviada.');
+      }
+      return true;
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Falha no cadastro';
-      setAuthError(msg);
-      throw err;
+      setAuthError(getFriendlyErrorMessage(err, 'Não foi possível concluir o cadastro.'));
+      return false;
     } finally {
-      setLoading(false);
+      registeringRef.current = false;
+      setActionLoading(false);
     }
   }, []);
 
   const logout = useCallback(async () => {
-    setLoading(true);
+    setActionLoading(true);
+    explicitLogoutRef.current = true;
     try {
-      await logoutUser();
+      await logoutUser(user?.uid ?? null);
       setUser(null);
       setFirebaseUser(null);
     } catch (err) {
-      console.error('[AuthContext] Falha ao efetuar logout:', err);
+      explicitLogoutRef.current = false;
+      setAuthError(getFriendlyErrorMessage(err, 'Não foi possível sair da conta.'));
     } finally {
-      setLoading(false);
+      setActionLoading(false);
     }
-  }, []);
+  }, [user]);
 
   const contextValue = useMemo<AuthContextType>(
     () => ({
       user,
       firebaseUser,
-      loading,
+      initializing,
+      actionLoading,
+      isAuthenticated: firebaseUser !== null && user !== null,
       authError,
+      authNotice,
       login,
       register,
       logout,
       refreshProfile,
       clearError,
+      clearNotice,
     }),
-    [user, firebaseUser, loading, authError, login, register, logout, refreshProfile, clearError]
+    [
+      user,
+      firebaseUser,
+      initializing,
+      actionLoading,
+      authError,
+      authNotice,
+      login,
+      register,
+      logout,
+      refreshProfile,
+      clearError,
+      clearNotice,
+    ]
   );
 
   return <AuthContext.Provider value={contextValue}>{children}</AuthContext.Provider>;

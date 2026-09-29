@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   View,
   TextInput,
@@ -11,16 +11,18 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { colors } from '../theme/colors';
-import { MessageTarget } from '../types/chat';
-import { ChatUser } from '../types/user';
+import { MAX_MESSAGE_LENGTH, MessageTarget } from '../types/chat';
+import { PublicUserProfile } from '../types/user';
 import { Avatar } from './Avatar';
 
 interface ChatInputProps {
-  onSend: (text: string, target?: MessageTarget, mentionedUserIds?: string[]) => Promise<void>;
+  onSend: (text: string, target?: MessageTarget, mentionedUserIds?: string[]) => Promise<boolean>;
   sending: boolean;
   isGroup: boolean;
-  groupMembers?: ChatUser[];
+  groupMembers?: PublicUserProfile[];
   currentUserId: string;
+  disabled?: boolean;
+  disabledMessage?: string;
 }
 
 export const ChatInput: React.FC<ChatInputProps> = ({
@@ -29,18 +31,23 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   isGroup,
   groupMembers = [],
   currentUserId,
+  disabled = false,
+  disabledMessage,
 }) => {
   const [text, setText] = useState<string>('');
-  const [targetMember, setTargetMember] = useState<ChatUser | null>(null);
-  const [mentionedMembers, setMentionedMembers] = useState<ChatUser[]>([]);
+  const [targetMember, setTargetMember] = useState<PublicUserProfile | null>(null);
+  const [mentionedMembers, setMentionedMembers] = useState<PublicUserProfile[]>([]);
   const [showMemberPicker, setShowMemberPicker] = useState<boolean>(false);
   const [pickerMode, setPickerMode] = useState<'target' | 'mention'>('mention');
 
-  // Filtra outros membros do grupo
-  const eligibleMembers = groupMembers.filter((m) => m.uid !== currentUserId);
+  // Integrantes que podem ser mencionados (todos, menos o próprio usuário)
+  const eligibleMembers = useMemo(
+    () => groupMembers.filter((m) => m.uid !== currentUserId),
+    [groupMembers, currentUserId]
+  );
 
   const handleSend = async () => {
-    if (!text.trim() || sending) return;
+    if (!text.trim() || sending || disabled) return;
 
     const trimmed = text.trim();
     const target: MessageTarget = targetMember
@@ -49,13 +56,12 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
     const mentionedIds = mentionedMembers.map((m) => m.uid);
 
-    try {
-      await onSend(trimmed, target, mentionedIds);
+    // Em caso de falha o texto é mantido para o usuário tentar de novo
+    const sent = await onSend(trimmed, target, mentionedIds);
+    if (sent) {
       setText('');
       setTargetMember(null);
       setMentionedMembers([]);
-    } catch {
-      // O erro já é tratado no hook pai
     }
   };
 
@@ -64,7 +70,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     setShowMemberPicker(true);
   };
 
-  const handleSelectMember = (member: ChatUser) => {
+  const handleSelectMember = (member: PublicUserProfile) => {
     if (pickerMode === 'target') {
       setTargetMember(member);
     } else {
@@ -75,6 +81,14 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     }
     setShowMemberPicker(false);
   };
+
+  if (disabled) {
+    return (
+      <View style={styles.container}>
+        <Text style={styles.disabledText}>{disabledMessage ?? 'Envio indisponível.'}</Text>
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container}>
@@ -140,7 +154,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           value={text}
           onChangeText={setText}
           multiline
-          maxLength={1000}
+          maxLength={MAX_MESSAGE_LENGTH}
         />
 
         {/* Botão de enviar */}
@@ -151,6 +165,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           ]}
           onPress={handleSend}
           disabled={!text.trim() || sending}
+          accessibilityLabel="Enviar mensagem"
         >
           {sending ? (
             <ActivityIndicator size="small" color="#FFFFFF" />
@@ -205,6 +220,12 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 };
 
 const styles = StyleSheet.create({
+  disabledText: {
+    color: colors.textMuted,
+    fontSize: 13,
+    textAlign: 'center',
+    paddingVertical: 12,
+  },
   container: {
     backgroundColor: colors.surface,
     borderTopWidth: 1,

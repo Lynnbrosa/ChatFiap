@@ -1,9 +1,9 @@
 {
-  "apiKey": "AIzaSyFakeKeyForFiapProjectValidation-X1Y2Z3",
-  "authDomain": "fiap-chat-production.firebaseapp.com",
-  "databaseURL": "https://fiap-chat-production-default-rtdb.firebaseio.com",
-  "projectId": "fiap-chat-production",
-  "storageBucket": "fiap-chat-production.appspot.com",
-  "messagingSenderId": "123456789012",
-  "appId": "1:123456789012:android:abcdef0123456789"
+  "apiKey": "AIzaSyDiFkgGM_Q8-agfyit8-szUzchLmU_iYo0",
+  "authDomain": "checkpoint2-9fe23.firebaseapp.com",
+  "databaseURL": "https://checkpoint2-9fe23-default-rtdb.firebaseio.com",
+  "projectId": "checkpoint2-9fe23",
+  "storageBucket": "checkpoint2-9fe23.firebasestorage.app",
+  "messagingSenderId": "639673241561",
+  "appId": "1:639673241561:web:777e13b7f7ca7fc55c93c8"
 }

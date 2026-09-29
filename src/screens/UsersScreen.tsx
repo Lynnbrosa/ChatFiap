@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   View,
   Text,
@@ -12,14 +12,16 @@ import { RouteProp, useNavigation, useRoute } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { Ionicons } from '@expo/vector-icons';
 import { RootStackParamList } from '../types/navigation';
+import { PublicUserProfile } from '../types/user';
 import { useAuth } from '../hooks/useAuth';
-import { getUsersList } from '../services/userService';
+import { listUsers } from '../services/userService';
 import { getOrCreateDirectConversation } from '../services/chatService';
-import { ChatUser } from '../types/user';
+import { getFriendlyErrorMessage } from '../utils/errors';
 import { colors } from '../theme/colors';
 import { Avatar } from '../components/Avatar';
 import { Loading } from '../components/Loading';
 import { EmptyState } from '../components/EmptyState';
+import { ErrorMessage } from '../components/ErrorMessage';
 
 type UsersScreenNavigationProp = NativeStackNavigationProp<RootStackParamList, 'Users'>;
 type UsersScreenRouteProp = RouteProp<RootStackParamList, 'Users'>;
@@ -27,100 +29,119 @@ type UsersScreenRouteProp = RouteProp<RootStackParamList, 'Users'>;
 export const UsersScreen: React.FC = () => {
   const navigation = useNavigation<UsersScreenNavigationProp>();
   const route = useRoute<UsersScreenRouteProp>();
+  const params = route.params;
   const { user: currentUser } = useAuth();
+  const currentUid = currentUser?.uid ?? null;
 
-  const mode = route.params?.mode || 'direct';
-  const initialSelected = route.params?.selectedIds || [];
-  const onSelectMembers = route.params?.onSelectMembers;
+  const isGroupSelect = params.mode === 'group_select';
+  const excludeIds = useMemo(
+    () => (params.mode === 'group_select' ? params.excludeIds ?? [] : []),
+    [params]
+  );
+  const maxSelectable = params.mode === 'group_select' ? params.maxSelectable : undefined;
 
-  const [users, setUsers] = useState<ChatUser[]>([]);
+  const [users, setUsers] = useState<PublicUserProfile[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [search, setSearch] = useState<string>('');
-  const [selectedIds, setSelectedIds] = useState<string[]>(initialSelected);
+  const [selectedIds, setSelectedIds] = useState<string[]>(
+    params.mode === 'group_select' ? params.selectedIds ?? [] : []
+  );
   const [startingChatWith, setStartingChatWith] = useState<string | null>(null);
 
-  useEffect(() => {
-    async function loadUsers() {
-      if (!currentUser) return;
-      try {
-        setLoading(true);
-        const list = await getUsersList(currentUser.uid);
-        setUsers(list);
-      } catch (err) {
-        console.error('[UsersScreen] Falha ao carregar usuários:', err);
-      } finally {
-        setLoading(false);
-      }
+  const loadUsers = useCallback(async () => {
+    if (!currentUid) return;
+    setLoading(true);
+    setLoadError(null);
+    try {
+      setUsers(await listUsers(currentUid));
+    } catch (err) {
+      setLoadError(getFriendlyErrorMessage(err, 'Não foi possível carregar a lista de usuários.'));
+    } finally {
+      setLoading(false);
     }
-    loadUsers();
-  }, [currentUser]);
+  }, [currentUid]);
 
+  useEffect(() => {
+    loadUsers();
+  }, [loadUsers]);
+
+  // O próprio usuário já é removido em listUsers; integrantes atuais também ficam de fora
   const filteredUsers = useMemo(() => {
-    if (!search.trim()) return users;
-    const q = search.toLowerCase();
-    return users.filter(
-      (u) =>
-        u.name.toLowerCase().includes(q) ||
-        u.email.toLowerCase().includes(q) ||
-        u.phoneNumber.includes(q)
-    );
-  }, [users, search]);
+    const available = users.filter((u) => u.uid !== currentUid && !excludeIds.includes(u.uid));
+    const q = search.trim().toLowerCase();
+    if (!q) return available;
+    return available.filter((u) => u.name.toLowerCase().includes(q));
+  }, [users, search, excludeIds, currentUid]);
+
+  const selectionLimitReached = maxSelectable !== undefined && selectedIds.length >= maxSelectable;
 
   const toggleSelect = (uid: string) => {
-    setSelectedIds((prev) =>
-      prev.includes(uid) ? prev.filter((id) => id !== uid) : [...prev, uid]
-    );
+    setActionError(null);
+    if (selectedIds.includes(uid)) {
+      setSelectedIds((prev) => prev.filter((id) => id !== uid));
+      return;
+    }
+    if (maxSelectable !== undefined && selectedIds.length >= maxSelectable) {
+      setActionError(`O grupo só tem ${maxSelectable} vaga(s) disponível(is).`);
+      return;
+    }
+    setSelectedIds((prev) => [...prev, uid]);
   };
 
-  const handleStartDirectChat = async (targetUser: ChatUser) => {
-    if (!currentUser) return;
+  const handleStartDirectChat = async (targetUser: PublicUserProfile) => {
+    if (!currentUid) return;
+    setActionError(null);
+    setStartingChatWith(targetUser.uid);
     try {
-      setStartingChatWith(targetUser.uid);
-      const directConvo = await getOrCreateDirectConversation(currentUser.uid, targetUser.uid);
+      const conversation = await getOrCreateDirectConversation(currentUid, targetUser.uid);
       navigation.replace('Chat', {
-        conversationId: directConvo.id,
+        conversationId: conversation.id,
         conversationType: 'direct',
         title: targetUser.name,
         photoUrl: targetUser.photoUrl,
         directParticipantUid: targetUser.uid,
       });
     } catch (err) {
-      console.error('[UsersScreen] Falha ao iniciar conversa direta:', err);
+      setActionError(getFriendlyErrorMessage(err, 'Não foi possível iniciar a conversa.'));
       setStartingChatWith(null);
     }
   };
 
   const handleConfirmGroupSelection = () => {
-    if (onSelectMembers) {
-      onSelectMembers(selectedIds);
+    if (params.mode !== 'group_select') return;
+    const { target } = params;
+    if (target.screen === 'GroupMembers') {
+      navigation.popTo('GroupMembers', { groupId: target.groupId, selectedMemberIds: selectedIds });
+    } else {
+      navigation.popTo('GroupForm', { selectedMemberIds: selectedIds }, { merge: true });
     }
-    navigation.goBack();
   };
 
   return (
     <View style={styles.container}>
-      {/* Barra de Pesquisa */}
       <View style={styles.searchBar}>
         <Ionicons name="search-outline" size={20} color={colors.textMuted} />
         <TextInput
           style={styles.searchInput}
-          placeholder="Buscar por nome, e-mail ou celular..."
+          placeholder="Buscar pelo nome..."
           placeholderTextColor={colors.textMuted}
           value={search}
           onChangeText={setSearch}
         />
         {search.length > 0 && (
-          <TouchableOpacity onPress={() => setSearch('')}>
+          <TouchableOpacity onPress={() => setSearch('')} accessibilityLabel="Limpar busca">
             <Ionicons name="close-circle" size={18} color={colors.textMuted} />
           </TouchableOpacity>
         )}
       </View>
 
-      {/* Botão de confirmação para seleção em grupo */}
-      {mode === 'group_select' && (
+      {isGroupSelect && (
         <View style={styles.selectionHeader}>
           <Text style={styles.selectionCount}>
-            {selectedIds.length} integrante(s) selecionado(s)
+            {selectedIds.length} selecionado(s)
+            {maxSelectable !== undefined ? ` • ${maxSelectable} vaga(s)` : ''}
           </Text>
           <TouchableOpacity
             style={[styles.confirmButton, selectedIds.length === 0 && styles.confirmButtonDisabled]}
@@ -132,8 +153,12 @@ export const UsersScreen: React.FC = () => {
         </View>
       )}
 
+      <ErrorMessage message={actionError || ''} onDismiss={() => setActionError(null)} />
+
       {loading ? (
-        <Loading message="Carregando lista de usuários..." fullscreen />
+        <Loading message="Carregando usuários..." fullscreen />
+      ) : loadError ? (
+        <ErrorMessage message={loadError} onRetry={loadUsers} />
       ) : (
         <FlatList
           data={filteredUsers}
@@ -141,27 +166,29 @@ export const UsersScreen: React.FC = () => {
           renderItem={({ item }) => {
             const isSelected = selectedIds.includes(item.uid);
             const isStarting = startingChatWith === item.uid;
+            const blocked = isGroupSelect && !isSelected && selectionLimitReached;
 
             return (
               <TouchableOpacity
-                style={[styles.userItem, isSelected && styles.userItemSelected]}
-                onPress={() => {
-                  if (mode === 'group_select') {
-                    toggleSelect(item.uid);
-                  } else {
-                    handleStartDirectChat(item);
-                  }
-                }}
-                disabled={isStarting}
+                style={[
+                  styles.userItem,
+                  isSelected && styles.userItemSelected,
+                  blocked && styles.userItemBlocked,
+                ]}
+                onPress={() =>
+                  isGroupSelect ? toggleSelect(item.uid) : handleStartDirectChat(item)
+                }
+                disabled={startingChatWith !== null}
               >
                 <Avatar uri={item.photoUrl} name={item.name} size={48} />
                 <View style={styles.userInfo}>
                   <Text style={styles.userName}>{item.name}</Text>
-                  <Text style={styles.userEmail}>{item.email}</Text>
-                  <Text style={styles.userPhone}>{item.phoneNumber}</Text>
+                  <Text style={styles.userEmail}>
+                    {isGroupSelect ? 'Toque para selecionar' : 'Toque para conversar'}
+                  </Text>
                 </View>
 
-                {mode === 'group_select' ? (
+                {isGroupSelect ? (
                   <View style={[styles.checkbox, isSelected && styles.checkboxChecked]}>
                     {isSelected && <Ionicons name="checkmark" size={16} color="#FFFFFF" />}
                   </View>
@@ -178,8 +205,12 @@ export const UsersScreen: React.FC = () => {
           ListEmptyComponent={
             <EmptyState
               icon="people-outline"
-              title="Nenhum usuário encontrado"
-              description="Não encontramos outros usuários cadastrados correspondentes à sua busca."
+              title="Nenhum usuário disponível"
+              description={
+                search
+                  ? 'Nenhum usuário corresponde à sua busca.'
+                  : 'Ainda não há outros usuários cadastrados para selecionar.'
+              }
             />
           }
         />
@@ -252,6 +283,9 @@ const styles = StyleSheet.create({
   userItemSelected: {
     backgroundColor: 'rgba(99, 102, 241, 0.12)',
   },
+  userItemBlocked: {
+    opacity: 0.45,
+  },
   userInfo: {
     flex: 1,
     marginLeft: 12,
@@ -265,11 +299,6 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: colors.textSecondary,
     marginTop: 2,
-  },
-  userPhone: {
-    fontSize: 12,
-    color: colors.textMuted,
-    marginTop: 1,
   },
   startChatIcon: {
     padding: 8,

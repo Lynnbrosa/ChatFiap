@@ -1,18 +1,18 @@
 {
   "expo": {
-    "name": "fiap-chat-firebase",
+    "name": "FIAP Chat",
     "slug": "fiap-chat-firebase",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "dark",
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.fiapchat.app"
     },
     "android": {
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
+        "backgroundColor": "#0B0F19",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
@@ -28,15 +28,20 @@
       [
         "expo-notifications",
         {
-          "icon": "./assets/icon.png",
-          "color": "#ffffff"
+          "icon": "./assets/android-icon-monochrome.png",
+          "color": "#6366F1"
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "O FIAP Chat acessa suas fotos para você escolher a foto de perfil e a foto dos grupos.",
+          "cameraPermission": "O FIAP Chat usa a câmera para você tirar a foto de perfil e a foto dos grupos."
         }
       ]
     ],
     "extra": {
-      "eas": {
-        "projectId": "seu-project-id-aqui"
-      }
+      "notificationsApiUrl": ""
     }
   }
 }

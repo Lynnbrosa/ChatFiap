@@ -39,3 +39,17 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# ------------------------------------------------------------------
+# SEGREDOS — nunca versionar (credenciais ficam só na hospedagem da API)
+.env
+server/.env
+*serviceAccount*.json
+*service-account*.json
+*-firebase-adminsdk-*.json
+firebaseAdminCredentials.json
+
+# Firebase CLI / emuladores
+.firebase/
+*-debug.log
+firebase-export-*/

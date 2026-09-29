@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "639673241561",
+    "firebase_url": "https://checkpoint2-9fe23-default-rtdb.firebaseio.com",
+    "project_id": "checkpoint2-9fe23",
+    "storage_bucket": "checkpoint2-9fe23.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:639673241561:android:4302edab750656525c93c8",
+        "android_client_info": {
+          "package_name": "com.fiapchat.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA5zUYeXKaROdHQ_LfMuMwDL40tsA0O8gw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

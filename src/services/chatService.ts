@@ -3,32 +3,37 @@ import {
   push,
   set,
   onValue,
-  off,
-  query,
+  query as rtdbQuery,
   orderByChild,
   limitToLast,
   DataSnapshot,
+  Unsubscribe as RtdbUnsubscribe,
 } from 'firebase/database';
 import {
-  doc,
-  getDoc,
-  setDoc,
-  updateDoc,
-  collection,
-  where,
   onSnapshot,
+  query,
+  runTransaction,
+  updateDoc,
+  where,
   Unsubscribe,
 } from 'firebase/firestore';
-import { rtdb, db, auth } from './firebase';
-import { ChatMessage, DirectConversation, MessageTarget } from '../types/chat';
+import { db, rtdb } from './firebase';
+import { directConversationDoc, directConversationsCollection, groupDoc } from './converters';
+import { apiRequest } from './apiClient';
+import {
+  ChatMessage,
+  ConversationType,
+  DirectConversation,
+  MAX_MESSAGE_LENGTH,
+  MessageTarget,
+} from '../types/chat';
+import { NotifyMessageResponse } from '../types/api';
 import { generateDirectConversationId } from '../utils/conversationId';
-
-const NOTIFICATIONS_API_URL =
-  process.env.EXPO_PUBLIC_NOTIFICATIONS_API_URL || 'http://localhost:3000';
+import { AppError } from '../utils/errors';
 
 export interface SendMessageParams {
   conversationId: string;
-  conversationType: 'direct' | 'group';
+  conversationType: ConversationType;
   senderId: string;
   senderName: string;
   text: string;
@@ -37,61 +42,111 @@ export interface SendMessageParams {
 }
 
 /**
- * Cria ou recupera uma conversa individual existente no Cloud Firestore.
- * Utiliza identificador determinístico baseado na ordenação dos UIDs dos participantes.
+ * Cria ou recupera a conversa individual no Cloud Firestore.
+ * O ID é derivado dos dois UIDs ordenados e a criação ocorre numa transação,
+ * então dois usuários abrindo a conversa ao mesmo tempo não geram duplicatas.
  */
 export async function getOrCreateDirectConversation(
-  userA: string,
-  userB: string
+  currentUid: string,
+  otherUid: string
 ): Promise<DirectConversation> {
-  const conversationId = generateDirectConversationId(userA, userB);
-  const convoDocRef = doc(db, 'directConversations', conversationId);
-
-  const snap = await getDoc(convoDocRef);
-  if (snap.exists()) {
-    return snap.data() as DirectConversation;
+  if (currentUid === otherUid) {
+    throw new AppError('Você não pode iniciar uma conversa consigo mesmo.');
   }
 
-  const sortedParticipants = [userA, userB].sort() as [string, string];
-  const newConversation: DirectConversation = {
-    id: conversationId,
-    type: 'direct',
-    participantIds: sortedParticipants,
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
-    lastMessage: '',
-  };
+  const conversationId = generateDirectConversationId(currentUid, otherUid);
+  const conversationRef = directConversationDoc(conversationId);
 
-  await setDoc(convoDocRef, newConversation);
-  return newConversation;
-}
+  return runTransaction(db, async (transaction) => {
+    const snap = await transaction.get(conversationRef);
+    if (snap.exists()) {
+      return snap.data();
+    }
 
-/**
- * Escuta em tempo real todas as conversas individuais do usuário no Firestore
- */
-export function listenUserDirectConversations(
-  userId: string,
-  callback: (conversations: DirectConversation[]) => void
-): Unsubscribe {
-  const convosRef = collection(db, 'directConversations');
-  const q = where('participantIds', 'array-contains', userId);
-
-  return onSnapshot(collection(db, 'directConversations'), (snapshot) => {
-    const list: DirectConversation[] = [];
-    snapshot.forEach((d) => {
-      const data = d.data() as DirectConversation;
-      if (data.participantIds && data.participantIds.includes(userId)) {
-        list.push(data);
-      }
-    });
-    list.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-    callback(list);
+    const [first, second] = [currentUid, otherUid].sort();
+    const now = Date.now();
+    const conversation: DirectConversation = {
+      id: conversationId,
+      type: 'direct',
+      participantIds: [first, second],
+      createdAt: now,
+      updatedAt: now,
+    };
+    transaction.set(conversationRef, conversation);
+    return conversation;
   });
 }
 
+/** Escuta em tempo real as conversas individuais das quais o usuário participa. */
+export function listenUserDirectConversations(
+  userId: string,
+  onData: (conversations: DirectConversation[]) => void,
+  onError: (error: Error) => void
+): Unsubscribe {
+  const q = query(directConversationsCollection(), where('participantIds', 'array-contains', userId));
+
+  return onSnapshot(
+    q,
+    (snapshot) => {
+      const list = snapshot.docs
+        .map((d) => d.data())
+        .sort((a, b) => (b.updatedAt ?? b.createdAt) - (a.updatedAt ?? a.createdAt));
+      onData(list);
+    },
+    onError
+  );
+}
+
+/** Valida em tempo de execução o formato de uma mensagem lida do Realtime Database. */
+export function parseChatMessage(value: unknown): ChatMessage | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const v = value as Record<string, unknown>;
+
+  if (
+    typeof v.id !== 'string' ||
+    typeof v.conversationId !== 'string' ||
+    (v.conversationType !== 'direct' && v.conversationType !== 'group') ||
+    typeof v.senderId !== 'string' ||
+    typeof v.text !== 'string' ||
+    typeof v.createdAt !== 'number'
+  ) {
+    return null;
+  }
+
+  let target: MessageTarget = { type: 'conversation' };
+  const rawTarget = v.target;
+  if (
+    typeof rawTarget === 'object' &&
+    rawTarget !== null &&
+    'type' in rawTarget &&
+    rawTarget.type === 'member' &&
+    'memberId' in rawTarget &&
+    typeof rawTarget.memberId === 'string'
+  ) {
+    target = { type: 'member', memberId: rawTarget.memberId };
+  }
+
+  // O Realtime Database não armazena arrays vazios, então o campo pode não existir
+  const mentionedUserIds = Array.isArray(v.mentionedUserIds)
+    ? v.mentionedUserIds.filter((id): id is string => typeof id === 'string')
+    : [];
+
+  return {
+    id: v.id,
+    conversationId: v.conversationId,
+    conversationType: v.conversationType,
+    senderId: v.senderId,
+    senderName: typeof v.senderName === 'string' ? v.senderName : undefined,
+    text: v.text,
+    target,
+    mentionedUserIds,
+    createdAt: v.createdAt,
+  };
+}
+
 /**
- * Persiste uma mensagem no Firebase Realtime Database e despacha o pedido
- * de push notification para a API online segura.
+ * Persiste a mensagem no Firebase Realtime Database.
+ * As regras do banco conferem se o remetente é o usuário autenticado e se ele participa da conversa.
  */
 export async function sendMessage(params: SendMessageParams): Promise<ChatMessage> {
   const {
@@ -99,141 +154,97 @@ export async function sendMessage(params: SendMessageParams): Promise<ChatMessag
     conversationType,
     senderId,
     senderName,
-    text,
     target = { type: 'conversation' },
     mentionedUserIds = [],
   } = params;
+  const text = params.text.trim();
 
-  if (!text || text.trim().length === 0) {
-    throw new Error('A mensagem não pode ser vazia.');
+  if (text.length === 0) {
+    throw new AppError('A mensagem não pode ser vazia.');
+  }
+  if (text.length > MAX_MESSAGE_LENGTH) {
+    throw new AppError(`A mensagem pode ter no máximo ${MAX_MESSAGE_LENGTH} caracteres.`);
   }
 
-  // 1. Gerar referência e ID no Realtime Database
-  const messagesRef = ref(rtdb, `messages/${conversationId}`);
-  const newMessageRef = push(messagesRef);
+  const newMessageRef = push(ref(rtdb, `messages/${conversationId}`));
   const messageId = newMessageRef.key;
-
   if (!messageId) {
-    throw new Error('Falha ao gerar identificador da mensagem no Realtime Database.');
+    throw new AppError('Falha ao gerar o identificador da mensagem.');
   }
 
   const now = Date.now();
-  const chatMessage: ChatMessage = {
+  const message: ChatMessage = {
     id: messageId,
     conversationId,
     conversationType,
     senderId,
     senderName,
-    text: text.trim(),
+    text,
     target,
-    mentionedUserIds,
+    mentionedUserIds: Array.from(new Set(mentionedUserIds)).filter((id) => id !== senderId),
     createdAt: now,
   };
 
-  // 2. Persistir no Realtime Database
-  await set(newMessageRef, chatMessage);
+  await set(newMessageRef, message);
 
-  // 3. Atualizar resumo de última mensagem no Firestore
+  // Resumo da última mensagem para a lista de conversas (metadado no Firestore)
+  const summary = {
+    lastMessage: text.length > 120 ? `${text.slice(0, 117)}...` : text,
+    lastMessageAt: now,
+    updatedAt: now,
+  };
   try {
     if (conversationType === 'direct') {
-      const directRef = doc(db, 'directConversations', conversationId);
-      await updateDoc(directRef, {
-        lastMessage: chatMessage.text,
-        lastMessageAt: now,
-        updatedAt: now,
-      });
+      await updateDoc(directConversationDoc(conversationId), summary);
     } else {
-      const groupRef = doc(db, 'groups', conversationId);
-      await updateDoc(groupRef, {
-        lastMessage: chatMessage.text,
-        lastMessageAt: now,
-        updatedAt: now,
-      });
+      await updateDoc(groupDoc(conversationId), summary);
     }
   } catch (err) {
-    console.warn('[ChatService] Não foi possível atualizar lastMessage no Firestore:', err);
+    console.warn('[ChatService] Não foi possível atualizar o resumo da conversa:', err);
   }
 
-  // 4. Disparar notificação push através da API online
-  triggerPushNotification(conversationId, messageId).catch((pushErr) => {
-    console.error('[ChatService] Falha assíncrona ao solicitar push para a API:', pushErr);
-  });
-
-  return chatMessage;
+  return message;
 }
 
 /**
- * Escuta as mensagens de uma conversa aberta em tempo real no Firebase Realtime Database
+ * Solicita à API online o envio do push da mensagem já persistida.
+ * O app envia apenas conversationId e messageId: os destinatários são calculados no servidor.
+ */
+export async function requestPushForMessage(
+  conversationId: string,
+  messageId: string
+): Promise<NotifyMessageResponse> {
+  return apiRequest<NotifyMessageResponse>('/notifications/messages', {
+    method: 'POST',
+    body: { conversationId, messageId },
+  });
+}
+
+/**
+ * Escuta em tempo real as últimas mensagens da conversa aberta.
+ * Retorna a função que remove o listener (chamada quando a tela é desmontada).
  */
 export function listenMessages(
   conversationId: string,
-  callback: (messages: ChatMessage[]) => void
-): () => void {
-  const messagesRef = ref(rtdb, `messages/${conversationId}`);
-  const messagesQuery = query(messagesRef, orderByChild('createdAt'), limitToLast(100));
+  onMessages: (messages: ChatMessage[]) => void,
+  onError: (error: Error) => void
+): RtdbUnsubscribe {
+  const messagesQuery = rtdbQuery(
+    ref(rtdb, `messages/${conversationId}`),
+    orderByChild('createdAt'),
+    limitToLast(100)
+  );
 
-  const listener = onValue(
+  return onValue(
     messagesQuery,
     (snapshot: DataSnapshot) => {
       const messages: ChatMessage[] = [];
-      if (snapshot.exists()) {
-        snapshot.forEach((child) => {
-          messages.push(child.val() as ChatMessage);
-        });
-      }
-      callback(messages);
+      snapshot.forEach((child) => {
+        const parsed = parseChatMessage(child.val());
+        if (parsed) messages.push(parsed);
+      });
+      onMessages(messages);
     },
-    (error) => {
-      console.error('[ChatService] Erro ao escutar mensagens no Realtime Database:', error);
-    }
+    onError
   );
-
-  // Função para desanexar o listener quando a tela for desmontada
-  return () => {
-    off(messagesQuery, 'value', listener);
-  };
-}
-
-/**
- * Faz a chamada autenticada à API online para envio de push notification
- */
-export async function triggerPushNotification(
-  conversationId: string,
-  messageId: string
-): Promise<void> {
-  const currentUser = auth.currentUser;
-  if (!currentUser) {
-    console.warn('[ChatService] Usuário não autenticado; cancelando solicitação de push.');
-    return;
-  }
-
-  try {
-    const idToken = await currentUser.getIdToken();
-    const endpoint = `${NOTIFICATIONS_API_URL.replace(/\/$/, '')}/notifications/messages`;
-
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${idToken}`,
-      },
-      body: JSON.stringify({
-        conversationId,
-        messageId,
-      }),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.warn(
-        `[ChatService] Resposta da API de notificações (${response.status}):`,
-        errorText
-      );
-    } else {
-      const data = await response.json();
-      console.log('[ChatService] Notificação processada pela API com sucesso:', data);
-    }
-  } catch (netErr) {
-    console.warn('[ChatService] Erro de rede ao conectar com a API de notificações:', netErr);
-  }
 }

@@ -1,3 +1,5 @@
+import { MAX_GROUP_LIMIT, MIN_GROUP_LIMIT } from '../types/group';
+
 export interface GroupValidationResult {
   valid: boolean;
   error?: string;
@@ -5,7 +7,7 @@ export interface GroupValidationResult {
 }
 
 /**
- * Valida os limites de integrantes e capacidade do grupo.
+ * Valida o limite de integrantes (mesmas condições aplicadas nas regras do Firestore).
  */
 export function validateGroupCapacity(
   currentMemberCount: number,
@@ -19,10 +21,18 @@ export function validateGroupCapacity(
     };
   }
 
-  if (newLimit < 2) {
+  if (newLimit < MIN_GROUP_LIMIT) {
     return {
       valid: false,
-      error: 'O grupo deve permitir no mínimo 2 integrantes.',
+      error: `O grupo deve permitir no mínimo ${MIN_GROUP_LIMIT} integrantes.`,
+      availableVacancies: 0,
+    };
+  }
+
+  if (newLimit > MAX_GROUP_LIMIT) {
+    return {
+      valid: false,
+      error: `O limite máximo permitido é de ${MAX_GROUP_LIMIT} integrantes.`,
       availableVacancies: 0,
     };
   }
@@ -30,40 +40,18 @@ export function validateGroupCapacity(
   if (newLimit < currentMemberCount) {
     return {
       valid: false,
-      error: `O limite (${newLimit}) não pode ser inferior à quantidade atual de integrantes (${currentMemberCount}).`,
+      error: `O limite (${newLimit}) não pode ser menor que a quantidade atual de integrantes (${currentMemberCount}).`,
       availableVacancies: 0,
     };
   }
 
-  const vacancies = newLimit - currentMemberCount;
-
   return {
     valid: true,
-    availableVacancies: vacancies,
+    availableVacancies: newLimit - currentMemberCount,
   };
 }
 
-/**
- * Verifica se um novo integrante pode ser adicionado ao grupo.
- */
-export function canAddMember(
-  currentMemberIds: string[],
-  memberLimit: number,
-  newMemberId: string
-): { allowed: boolean; reason?: string } {
-  if (currentMemberIds.includes(newMemberId)) {
-    return {
-      allowed: false,
-      reason: 'O usuário já é integrante deste grupo.',
-    };
-  }
-
-  if (currentMemberIds.length >= memberLimit) {
-    return {
-      allowed: false,
-      reason: 'O limite máximo de integrantes deste grupo foi atingido.',
-    };
-  }
-
-  return { allowed: true };
+/** Quantidade de vagas restantes (nunca negativa). */
+export function getAvailableVacancies(memberCount: number, memberLimit: number): number {
+  return Math.max(0, memberLimit - memberCount);
 }

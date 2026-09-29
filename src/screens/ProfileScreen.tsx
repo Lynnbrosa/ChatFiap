@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -11,65 +11,87 @@ import { RouteProp, useNavigation, useRoute } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { Ionicons } from '@expo/vector-icons';
 import { RootStackParamList } from '../types/navigation';
-import { useAuth } from '../hooks/useAuth';
-import { getUserProfile } from '../services/userService';
 import { ChatUser } from '../types/user';
+import { useAuth } from '../hooks/useAuth';
+import { getSharedUserProfile } from '../services/userService';
+import { ApiError, getFriendlyErrorMessage } from '../utils/errors';
 import { colors } from '../theme/colors';
 import { Avatar } from '../components/Avatar';
-import { formatTimeOrDate } from '../utils/formatters';
 
 type ProfileScreenNavigationProp = NativeStackNavigationProp<RootStackParamList, 'Profile'>;
 type ProfileScreenRouteProp = RouteProp<RootStackParamList, 'Profile'>;
+
+type InfoRowProps = {
+  icon: React.ComponentProps<typeof Ionicons>['name'];
+  label: string;
+  value: string | undefined;
+  fallback: string;
+};
+
+const InfoRow: React.FC<InfoRowProps> = ({ icon, label, value, fallback }) => (
+  <View style={styles.infoRow}>
+    <View style={styles.iconCircle}>
+      <Ionicons name={icon} size={18} color={colors.primaryLight} />
+    </View>
+    <View style={styles.infoTexts}>
+      <Text style={styles.infoLabel}>{label}</Text>
+      <Text style={[styles.infoValue, !value && styles.infoValueMissing]}>{value || fallback}</Text>
+    </View>
+  </View>
+);
+
+function formatMemberSince(timestamp: number | undefined): string | undefined {
+  if (!timestamp) return undefined;
+  return new Date(timestamp).toLocaleDateString('pt-BR');
+}
 
 export const ProfileScreen: React.FC = () => {
   const navigation = useNavigation<ProfileScreenNavigationProp>();
   const route = useRoute<ProfileScreenRouteProp>();
   const { user: currentUser } = useAuth();
   const targetUid = route.params.userUid;
+  const isSelf = currentUser?.uid === targetUid;
 
-  const [targetUser, setTargetUser] = useState<ChatUser | null>(null);
-  const [loading, setLoading] = useState<boolean>(true);
+  const [targetUser, setTargetUser] = useState<ChatUser | null>(isSelf ? currentUser : null);
+  const [loading, setLoading] = useState<boolean>(!isSelf);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    async function fetchProfile() {
-      try {
-        setLoading(true);
-        setError(null);
-
-        const profile = await getUserProfile(targetUid);
-        if (!profile) {
-          setError('Perfil de usuário não encontrado.');
-        } else {
-          setTargetUser(profile);
-        }
-      } catch (err) {
-        console.error('[ProfileScreen] Erro ao carregar perfil:', err);
-        setError('Não foi possível carregar os dados deste perfil.');
-      } finally {
-        setLoading(false);
+  // Dados cadastrais de outra pessoa vêm da API, que exige conversa ou grupo em comum
+  const fetchProfile = useCallback(async () => {
+    if (isSelf) return;
+    setLoading(true);
+    setError(null);
+    try {
+      setTargetUser(await getSharedUserProfile(targetUid));
+    } catch (err) {
+      if (err instanceof ApiError && err.code === 'forbidden') {
+        setError('Você só pode ver o perfil de quem participa de uma conversa ou grupo com você.');
+      } else if (err instanceof ApiError && err.code === 'not_found') {
+        setError('Perfil de usuário não encontrado.');
+      } else {
+        setError(getFriendlyErrorMessage(err, 'Não foi possível carregar este perfil.'));
       }
+    } finally {
+      setLoading(false);
     }
+  }, [isSelf, targetUid]);
 
+  useEffect(() => {
+    if (isSelf) {
+      setTargetUser(currentUser);
+      return;
+    }
     fetchProfile();
-  }, [targetUid]);
-
-  const isSelf = currentUser?.uid === targetUid;
+  }, [isSelf, currentUser, fetchProfile]);
 
   return (
     <View style={styles.container}>
       <View style={styles.header}>
-        <TouchableOpacity
-          style={styles.backButton}
-          onPress={() => navigation.goBack()}
-          accessibilityLabel="Voltar"
-        >
+        <TouchableOpacity style={styles.backButton} onPress={() => navigation.goBack()} accessibilityLabel="Voltar">
           <Ionicons name="arrow-back" size={24} color={colors.textPrimary} />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>
-          {isSelf ? 'Meu Perfil' : 'Perfil do Usuário'}
-        </Text>
-        <View style={{ width: 24 }} />
+        <Text style={styles.headerTitle}>{isSelf ? 'Meu perfil' : 'Perfil do usuário'}</Text>
+        <View style={styles.headerSpacer} />
       </View>
 
       {loading ? (
@@ -79,19 +101,24 @@ export const ProfileScreen: React.FC = () => {
         </View>
       ) : error || !targetUser ? (
         <View style={styles.errorContainer}>
-          <Ionicons name="alert-circle-outline" size={48} color={colors.danger} />
-          <Text style={styles.errorText}>{error || 'Perfil indisponível.'}</Text>
-          <TouchableOpacity style={styles.retryButton} onPress={() => navigation.goBack()}>
-            <Text style={styles.retryButtonText}>Voltar</Text>
-          </TouchableOpacity>
+          <Ionicons name="lock-closed-outline" size={48} color={colors.danger} />
+          <Text style={styles.errorText}>{error ?? 'Perfil indisponível.'}</Text>
+          <View style={styles.errorActions}>
+            {!isSelf && (
+              <TouchableOpacity style={styles.retryButton} onPress={fetchProfile}>
+                <Text style={styles.retryButtonText}>Tentar novamente</Text>
+              </TouchableOpacity>
+            )}
+            <TouchableOpacity style={styles.retryButton} onPress={() => navigation.goBack()}>
+              <Text style={styles.retryButtonText}>Voltar</Text>
+            </TouchableOpacity>
+          </View>
         </View>
       ) : (
         <ScrollView contentContainerStyle={styles.content}>
-          {/* Avatar e Nome Principal */}
           <View style={styles.profileHeader}>
             <Avatar uri={targetUser.photoUrl} name={targetUser.name} size={96} />
-            <Text style={styles.userName}>{targetUser.name}</Text>
-            <Text style={styles.userEmail}>{targetUser.email}</Text>
+            <Text style={styles.userName}>{targetUser.name || 'Nome não informado'}</Text>
             {isSelf && (
               <View style={styles.selfBadge}>
                 <Text style={styles.selfBadgeText}>Sua conta</Text>
@@ -99,57 +126,27 @@ export const ProfileScreen: React.FC = () => {
             )}
           </View>
 
-          {/* Dados Cadastrais Detalhados */}
           <View style={styles.card}>
-            <Text style={styles.cardSectionTitle}>Informações de Contato</Text>
-
-            <View style={styles.infoRow}>
-              <View style={styles.iconCircle}>
-                <Ionicons name="call-outline" size={18} color={colors.primaryLight} />
-              </View>
-              <View style={styles.infoTexts}>
-                <Text style={styles.infoLabel}>Telefone Celular</Text>
-                <Text style={styles.infoValue}>
-                  {targetUser.phoneNumber || 'Não informado'}
-                </Text>
-              </View>
-            </View>
-
-            <View style={styles.infoRow}>
-              <View style={styles.iconCircle}>
-                <Ionicons name="mail-outline" size={18} color={colors.primaryLight} />
-              </View>
-              <View style={styles.infoTexts}>
-                <Text style={styles.infoLabel}>E-mail</Text>
-                <Text style={styles.infoValue}>{targetUser.email}</Text>
-              </View>
-            </View>
-
-            <View style={styles.infoRow}>
-              <View style={styles.iconCircle}>
-                <Ionicons name="calendar-outline" size={18} color={colors.primaryLight} />
-              </View>
-              <View style={styles.infoTexts}>
-                <Text style={styles.infoLabel}>Data de Nascimento</Text>
-                <Text style={styles.infoValue}>
-                  {targetUser.birthDate || 'Não informada'}
-                </Text>
-              </View>
-            </View>
-
-            <View style={styles.infoRow}>
-              <View style={styles.iconCircle}>
-                <Ionicons name="time-outline" size={18} color={colors.primaryLight} />
-              </View>
-              <View style={styles.infoTexts}>
-                <Text style={styles.infoLabel}>Membro desde</Text>
-                <Text style={styles.infoValue}>
-                  {targetUser.createdAt
-                    ? formatTimeOrDate(targetUser.createdAt)
-                    : 'Recente'}
-                </Text>
-              </View>
-            </View>
+            <Text style={styles.cardSectionTitle}>Dados cadastrais</Text>
+            <InfoRow icon="mail-outline" label="E-mail" value={targetUser.email} fallback="Não informado" />
+            <InfoRow
+              icon="call-outline"
+              label="Número de celular"
+              value={targetUser.phoneNumber}
+              fallback="Não informado"
+            />
+            <InfoRow
+              icon="calendar-outline"
+              label="Data de nascimento"
+              value={targetUser.birthDate}
+              fallback="Não informada"
+            />
+            <InfoRow
+              icon="time-outline"
+              label="Membro desde"
+              value={formatMemberSince(targetUser.createdAt)}
+              fallback="Indisponível"
+            />
           </View>
         </ScrollView>
       )}
@@ -180,6 +177,9 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: colors.textPrimary,
   },
+  headerSpacer: {
+    width: 34,
+  },
   loadingContainer: {
     flex: 1,
     justifyContent: 'center',
@@ -197,10 +197,15 @@ const styles = StyleSheet.create({
     padding: 24,
   },
   errorText: {
-    color: colors.danger,
+    color: colors.textPrimary,
     fontSize: 16,
     textAlign: 'center',
     marginVertical: 12,
+    lineHeight: 22,
+  },
+  errorActions: {
+    flexDirection: 'row',
+    gap: 12,
   },
   retryButton: {
     backgroundColor: colors.surfaceElevated,
@@ -226,11 +231,6 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: colors.textPrimary,
     marginTop: 14,
-  },
-  userEmail: {
-    fontSize: 14,
-    color: colors.textSecondary,
-    marginTop: 4,
   },
   selfBadge: {
     backgroundColor: colors.primaryMuted,
@@ -285,5 +285,9 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: colors.textPrimary,
     marginTop: 1,
+  },
+  infoValueMissing: {
+    color: colors.textMuted,
+    fontStyle: 'italic',
   },
 });

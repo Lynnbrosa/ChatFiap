@@ -9,23 +9,24 @@ import {
   KeyboardAvoidingView,
   Platform,
   ScrollView,
-  Image,
 } from 'react-native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { useNavigation } from '@react-navigation/native';
-import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
 import { RootStackParamList } from '../types/navigation';
 import { useAuth } from '../hooks/useAuth';
 import { colors } from '../theme/colors';
 import { ErrorMessage } from '../components/ErrorMessage';
+import { PhotoPicker } from '../components/PhotoPicker';
+import { PickedImage } from '../types/image';
 import { formatPhoneNumber, formatBirthDate } from '../utils/formatters';
+import { isValidBirthDate, isValidEmail, isValidPhoneNumber } from '../utils/validators';
 
 type RegisterScreenNavigationProp = NativeStackNavigationProp<RootStackParamList, 'Register'>;
 
 export const RegisterScreen: React.FC = () => {
   const navigation = useNavigation<RegisterScreenNavigationProp>();
-  const { register, loading, authError, clearError } = useAuth();
+  const { register, actionLoading, authError, clearError } = useAuth();
 
   const [name, setName] = useState<string>('');
   const [email, setEmail] = useState<string>('');
@@ -33,90 +34,42 @@ export const RegisterScreen: React.FC = () => {
   const [confirmPassword, setConfirmPassword] = useState<string>('');
   const [phoneNumber, setPhoneNumber] = useState<string>('');
   const [birthDate, setBirthDate] = useState<string>('');
-  const [photoUri, setPhotoUri] = useState<string | null>(null);
+  const [photo, setPhoto] = useState<PickedImage | null>(null);
 
   const [showPassword, setShowPassword] = useState<boolean>(false);
   const [localError, setLocalError] = useState<string | null>(null);
 
-  const handlePickPhoto = async () => {
-    try {
-      const permissionResult = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (!permissionResult.granted) {
-        setLocalError('Permissão para acessar a galeria de fotos foi negada.');
-        return;
-      }
-
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ['images'],
-        allowsEditing: true,
-        aspect: [1, 1],
-        quality: 0.8,
-      });
-
-      if (!result.canceled && result.assets && result.assets.length > 0) {
-        setPhotoUri(result.assets[0].uri);
-      }
-    } catch (err) {
-      console.error('[RegisterScreen] Erro ao selecionar imagem:', err);
-      setLocalError('Erro ao abrir a galeria de imagens.');
-    }
+  const validate = (): string | null => {
+    if (!name.trim()) return 'Informe seu nome completo.';
+    if (name.trim().length > 80) return 'O nome pode ter no máximo 80 caracteres.';
+    if (!isValidEmail(email)) return 'Informe um e-mail válido.';
+    if (!isValidPhoneNumber(phoneNumber)) return 'Informe um celular válido com DDD.';
+    if (!isValidBirthDate(birthDate)) return 'Informe uma data de nascimento válida (DD/MM/AAAA).';
+    if (password.length < 6) return 'A senha deve ter no mínimo 6 caracteres.';
+    if (password !== confirmPassword) return 'A confirmação de senha não coincide com a senha.';
+    return null;
   };
 
   const handleRegister = async () => {
     setLocalError(null);
     clearError();
 
-    if (!name.trim()) {
-      setLocalError('Por favor, informe seu nome completo.');
-      return;
-    }
-    if (!email.trim()) {
-      setLocalError('Por favor, informe seu endereço de e-mail.');
-      return;
-    }
-    if (!password) {
-      setLocalError('Por favor, crie uma senha segura.');
-      return;
-    }
-    if (password.length < 6) {
-      setLocalError('A senha deve possuir no mínimo 6 caracteres.');
-      return;
-    }
-    if (password !== confirmPassword) {
-      setLocalError('A confirmação de senha não coincide com a senha digitada.');
-      return;
-    }
-    if (!phoneNumber.trim()) {
-      setLocalError('Por favor, informe seu número de celular com DDD.');
-      return;
-    }
-    if (!birthDate.trim()) {
-      setLocalError('Por favor, informe sua data de nascimento.');
+    const validationError = validate();
+    if (validationError) {
+      setLocalError(validationError);
       return;
     }
 
-    try {
-      await register({
-        name: name.trim(),
-        email: email.trim(),
-        password,
-        phoneNumber: phoneNumber.trim(),
-        birthDate: birthDate.trim(),
-        photoUri,
-      });
-      // Auth state changes and routes to Conversations
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Falha no cadastro.';
-      if (msg.includes('email-already-in-use')) {
-        setLocalError('Este endereço de e-mail já está em uso.');
-      } else if (msg.includes('invalid-email')) {
-        setLocalError('Formato de e-mail inválido.');
-      } else if (msg.includes('weak-password')) {
-        setLocalError('A senha escolhida é fraca. Utilize números e letras.');
-      } else {
-        setLocalError(msg);
-      }
-    }
+    // Em caso de sucesso o app entra direto nas conversas; em caso de falha o
+    // formulário continua preenchido e o erro amigável aparece em authError.
+    await register({
+      name: name.trim(),
+      email: email.trim(),
+      password,
+      phoneNumber: phoneNumber.trim(),
+      birthDate: birthDate.trim(),
+      photo,
+    });
   };
 
   const activeError = localError || authError;
@@ -128,30 +81,32 @@ export const RegisterScreen: React.FC = () => {
     >
       <ScrollView contentContainerStyle={styles.scrollContainer} keyboardShouldPersistTaps="handled">
         <View style={styles.header}>
-          <Text style={styles.title}>Criar Nova Conta</Text>
+          <Text style={styles.title}>Criar nova conta</Text>
           <Text style={styles.subtitle}>Preencha seus dados para começar a conversar</Text>
         </View>
 
-        <ErrorMessage message={activeError || ''} onDismiss={() => { setLocalError(null); clearError(); }} />
+        <ErrorMessage
+          message={activeError || ''}
+          onDismiss={() => {
+            setLocalError(null);
+            clearError();
+          }}
+        />
 
         <View style={styles.card}>
-          {/* Seletor de Foto de Perfil */}
           <View style={styles.avatarSection}>
-            <TouchableOpacity style={styles.avatarButton} onPress={handlePickPhoto}>
-              {photoUri ? (
-                <Image source={{ uri: photoUri }} style={styles.avatarPreview} />
-              ) : (
-                <View style={styles.avatarPlaceholder}>
-                  <Ionicons name="camera-outline" size={32} color={colors.primaryLight} />
-                  <Text style={styles.avatarPlaceholderText}>Adicionar Foto</Text>
-                </View>
-              )}
-            </TouchableOpacity>
+            <PhotoPicker
+              image={photo}
+              label="Foto de perfil"
+              size={90}
+              onChange={setPhoto}
+              onError={setLocalError}
+              disabled={actionLoading}
+            />
           </View>
 
-          {/* Nome */}
           <View style={styles.inputGroup}>
-            <Text style={styles.label}>Nome Completo</Text>
+            <Text style={styles.label}>Nome completo</Text>
             <View style={styles.inputWrapper}>
               <Ionicons name="person-outline" size={20} color={colors.textMuted} style={styles.inputIcon} />
               <TextInput
@@ -161,11 +116,11 @@ export const RegisterScreen: React.FC = () => {
                 value={name}
                 onChangeText={setName}
                 autoCapitalize="words"
+                maxLength={80}
               />
             </View>
           </View>
 
-          {/* E-mail */}
           <View style={styles.inputGroup}>
             <Text style={styles.label}>E-mail</Text>
             <View style={styles.inputWrapper}>
@@ -178,13 +133,13 @@ export const RegisterScreen: React.FC = () => {
                 onChangeText={setEmail}
                 keyboardType="email-address"
                 autoCapitalize="none"
+                autoComplete="email"
               />
             </View>
           </View>
 
-          {/* Celular com formatação */}
           <View style={styles.inputGroup}>
-            <Text style={styles.label}>Número de Celular</Text>
+            <Text style={styles.label}>Número de celular</Text>
             <View style={styles.inputWrapper}>
               <Ionicons name="call-outline" size={20} color={colors.textMuted} style={styles.inputIcon} />
               <TextInput
@@ -199,9 +154,8 @@ export const RegisterScreen: React.FC = () => {
             </View>
           </View>
 
-          {/* Data de Nascimento com formatação */}
           <View style={styles.inputGroup}>
-            <Text style={styles.label}>Data de Nascimento</Text>
+            <Text style={styles.label}>Data de nascimento</Text>
             <View style={styles.inputWrapper}>
               <Ionicons name="calendar-outline" size={20} color={colors.textMuted} style={styles.inputIcon} />
               <TextInput
@@ -216,7 +170,6 @@ export const RegisterScreen: React.FC = () => {
             </View>
           </View>
 
-          {/* Senha */}
           <View style={styles.inputGroup}>
             <Text style={styles.label}>Senha (mínimo 6 caracteres)</Text>
             <View style={styles.inputWrapper}>
@@ -230,8 +183,9 @@ export const RegisterScreen: React.FC = () => {
                 secureTextEntry={!showPassword}
               />
               <TouchableOpacity
-                onPress={() => setShowPassword(!showPassword)}
+                onPress={() => setShowPassword((prev) => !prev)}
                 style={styles.eyeButton}
+                accessibilityLabel={showPassword ? 'Ocultar senha' : 'Mostrar senha'}
               >
                 <Ionicons
                   name={showPassword ? 'eye-off-outline' : 'eye-outline'}
@@ -242,9 +196,8 @@ export const RegisterScreen: React.FC = () => {
             </View>
           </View>
 
-          {/* Confirmação de Senha */}
           <View style={styles.inputGroup}>
-            <Text style={styles.label}>Confirmar Senha</Text>
+            <Text style={styles.label}>Confirmar senha</Text>
             <View style={styles.inputWrapper}>
               <Ionicons name="shield-outline" size={20} color={colors.textMuted} style={styles.inputIcon} />
               <TextInput
@@ -258,24 +211,28 @@ export const RegisterScreen: React.FC = () => {
             </View>
           </View>
 
-          {/* Botão de Cadastro */}
           <TouchableOpacity
-            style={[styles.submitButton, loading && styles.submitButtonDisabled]}
+            style={[styles.submitButton, actionLoading && styles.submitButtonDisabled]}
             onPress={handleRegister}
-            disabled={loading}
+            disabled={actionLoading}
           >
-            {loading ? (
+            {actionLoading ? (
               <ActivityIndicator color="#FFFFFF" size="small" />
             ) : (
-              <Text style={styles.submitButtonText}>Cadastrar Conta</Text>
+              <Text style={styles.submitButtonText}>Cadastrar conta</Text>
             )}
           </TouchableOpacity>
 
-          {/* Voltar para Login */}
           <View style={styles.footerRow}>
             <Text style={styles.footerText}>Já tem uma conta?</Text>
-            <TouchableOpacity onPress={() => navigation.navigate('Login')}>
-              <Text style={styles.loginLink}> Fazer Login</Text>
+            <TouchableOpacity
+              onPress={() => {
+                clearError();
+                navigation.navigate('Login');
+              }}
+              disabled={actionLoading}
+            >
+              <Text style={styles.loginLink}> Fazer login</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -319,32 +276,6 @@ const styles = StyleSheet.create({
   avatarSection: {
     alignItems: 'center',
     marginBottom: 16,
-  },
-  avatarButton: {
-    width: 90,
-    height: 90,
-    borderRadius: 45,
-    overflow: 'hidden',
-    borderWidth: 2,
-    borderColor: colors.primary,
-    borderStyle: 'dashed',
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: colors.surfaceElevated,
-  },
-  avatarPreview: {
-    width: '100%',
-    height: '100%',
-  },
-  avatarPlaceholder: {
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  avatarPlaceholderText: {
-    fontSize: 11,
-    color: colors.primaryLight,
-    fontWeight: '600',
-    marginTop: 4,
   },
   inputGroup: {
     marginBottom: 14,

@@ -1,13 +1,48 @@
 {
   "rules": {
+    // Tudo fechado por padrão
+    ".read": false,
+    ".write": false,
+
+    // Espelho dos integrantes ativos de cada grupo: groupMembers/{groupId}/{uid} = true.
+    // O RTDB não consegue consultar o Firestore, então a API (Admin SDK) mantém este espelho
+    // sincronizado com groups/{groupId}.memberIds. Clientes não escrevem aqui.
+    "groupMembers": {
+      "$groupId": {
+        "$uid": {
+          ".read": "auth != null && auth.uid === $uid"
+        }
+      }
+    },
+
     "messages": {
       "$conversationId": {
-        // Apenas usuários autenticados podem ler mensagens
-        ".read": "auth != null",
+        // Leitura: participantes da conversa individual (ID = uidA_uidB) ou integrantes ativos do grupo.
+        // Um integrante removido sai do espelho e perde o acesso às mensagens novas imediatamente.
+        ".read": "auth != null && ($conversationId.beginsWith(auth.uid + '_') || $conversationId.endsWith('_' + auth.uid) || root.child('groupMembers').child($conversationId).child(auth.uid).val() === true)",
+        ".indexOn": ["createdAt"],
+
         "$messageId": {
-          // Apenas o usuário autenticado pode gravar se o senderId for o seu próprio UID
-          ".write": "auth != null && (!data.exists() || data.child('senderId').val() === auth.uid)",
-          ".validate": "newData.hasChildren(['id', 'conversationId', 'conversationType', 'senderId', 'text', 'createdAt']) && newData.child('senderId').val() === auth.uid"
+          // Mensagens são imutáveis: só criação, pelo próprio remetente, se ele participa da conversa
+          ".write": "auth != null && !data.exists() && newData.exists()",
+          ".validate": "newData.hasChildren(['id', 'conversationId', 'conversationType', 'senderId', 'text', 'target', 'createdAt']) && ((newData.child('conversationType').val() === 'direct' && ($conversationId.beginsWith(auth.uid + '_') || $conversationId.endsWith('_' + auth.uid))) || (newData.child('conversationType').val() === 'group' && root.child('groupMembers').child($conversationId).child(auth.uid).val() === true))",
+
+          "id": { ".validate": "newData.val() === $messageId" },
+          "conversationId": { ".validate": "newData.val() === $conversationId" },
+          "conversationType": { ".validate": "newData.val() === 'direct' || newData.val() === 'group'" },
+          "senderId": { ".validate": "newData.val() === auth.uid" },
+          "senderName": { ".validate": "newData.isString() && newData.val().length <= 80" },
+          "text": { ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 1000" },
+          "createdAt": { ".validate": "newData.isNumber() && newData.val() <= now + 60000" },
+          "target": {
+            "type": { ".validate": "newData.val() === 'conversation' || newData.val() === 'member'" },
+            "memberId": { ".validate": "newData.isString() && newData.parent().child('type').val() === 'member'" },
+            "$other": { ".validate": false }
+          },
+          "mentionedUserIds": {
+            "$index": { ".validate": "newData.isString()" }
+          },
+          "$other": { ".validate": false }
         }
       }
     }

@@ -1,146 +1,146 @@
 import { Router, Response } from 'express';
-import { authenticate, AuthenticatedRequest } from '../middleware/authenticate';
+import { authenticate, AuthenticatedRequest, requireUser } from '../middleware/authenticate';
 import { adminDatabase, adminFirestore } from '../services/firebaseAdmin';
-import { resolveRecipients, MessageRecord } from '../services/recipientResolver';
+import { resolveRecipients } from '../services/recipientResolver';
 import { sendPushNotifications } from '../services/notificationSender';
+import { parseMessageRecord } from '../services/types';
+import { isValidKey } from './validation';
 
 const router = Router();
 
+const PREVIEW_LENGTH = 100;
+
+function isAlreadyExistsError(err: unknown): boolean {
+  // Código gRPC 6 = ALREADY_EXISTS (documento de idempotência já criado)
+  return typeof err === 'object' && err !== null && 'code' in err && (err as { code: unknown }).code === 6;
+}
+
+function preview(text: string): string {
+  const singleLine = text.replace(/\s+/g, ' ').trim();
+  return singleLine.length > PREVIEW_LENGTH ? `${singleLine.slice(0, PREVIEW_LENGTH - 3)}...` : singleLine;
+}
+
 /**
  * POST /notifications/messages
- * Dispara envio seguro de notificações push para uma mensagem persistida no Realtime Database.
- * Requer Bearer Token no cabeçalho Authorization.
+ * Body: { conversationId, messageId }
+ *
+ * 1. Valida o Firebase ID Token (middleware authenticate).
+ * 2. Confirma no Realtime Database que a mensagem existe e que o remetente é o usuário autenticado.
+ * 3. Reserva a mensagem de forma ATÔMICA (create) — reenvios não geram push duplicado.
+ * 4. Consulta participantes, política e tokens no Firestore e calcula os destinatários no servidor.
+ * 5. Envia pelo Expo Push Service / FCM.
  */
 router.post('/messages', authenticate, async (req: AuthenticatedRequest, res: Response): Promise<void> => {
-  const { conversationId, messageId } = req.body;
-  const authenticatedUserId = req.user?.uid;
+  const user = requireUser(req);
+  const body: unknown = req.body;
+  const conversationId =
+    typeof body === 'object' && body !== null && 'conversationId' in body ? body.conversationId : undefined;
+  const messageId = typeof body === 'object' && body !== null && 'messageId' in body ? body.messageId : undefined;
 
-  if (!conversationId || typeof conversationId !== 'string') {
+  if (!isValidKey(conversationId) || !isValidKey(messageId)) {
     res.status(400).json({
-      error: 'Parâmetro inválido',
-      message: 'O campo conversationId é obrigatório e deve ser uma string.',
-    });
-    return;
-  }
-
-  if (!messageId || typeof messageId !== 'string') {
-    res.status(400).json({
-      error: 'Parâmetro inválido',
-      message: 'O campo messageId é obrigatório e deve ser uma string.',
+      error: 'invalid_request',
+      message: 'Envie conversationId e messageId válidos.',
     });
     return;
   }
 
   try {
-    // 1. Proteção contra chamadas duplicadas (Idempotência)
-    const idempotencyRef = adminFirestore.collection('notifiedMessages').doc(messageId);
-    const existingLog = await idempotencyRef.get();
+    // Mensagem precisa existir no RTDB
+    const snapshot = await adminDatabase.ref(`messages/${conversationId}/${messageId}`).get();
+    const message = snapshot.exists() ? parseMessageRecord(snapshot.val()) : null;
 
-    if (existingLog.exists) {
-      console.log(`[NotificationRoute] Chamada duplicada ignorada para messageId: ${messageId}`);
-      res.status(200).json({
-        success: true,
-        message: 'Notificação já processada anteriormente (idempotência garantida).',
-        duplicate: true,
-        data: existingLog.data(),
-      });
+    if (!message) {
+      res.status(404).json({ error: 'not_found', message: 'Mensagem não encontrada.' });
       return;
     }
 
-    // 2. Buscar e validar a mensagem no Firebase Realtime Database
-    const messageSnapshot = await adminDatabase
-      .ref(`messages/${conversationId}/${messageId}`)
-      .once('value');
-
-    if (!messageSnapshot.exists()) {
-      res.status(404).json({
-        error: 'Mensagem não encontrada',
-        message: `A mensagem ${messageId} não foi encontrada no Realtime Database na conversa ${conversationId}.`,
-      });
-      return;
-    }
-
-    const messageData = messageSnapshot.val() as MessageRecord;
-
-    // 3. Validar se o remetente da mensagem gravada corresponde ao usuário autenticado
-    if (messageData.senderId !== authenticatedUserId) {
+    // O remetente gravado precisa ser o usuário do token, e os dados precisam bater com o caminho
+    if (
+      message.senderId !== user.uid ||
+      message.conversationId !== conversationId ||
+      message.id !== messageId
+    ) {
       res.status(403).json({
-        error: 'Ação não permitida',
-        message: 'O remetente registrado na mensagem não corresponde ao usuário autenticado pelo token.',
+        error: 'forbidden',
+        message: 'Você só pode solicitar notificações das suas próprias mensagens.',
       });
       return;
     }
 
-    // 4. Calcular os destinatários autorizados no servidor
-    const resolved = await resolveRecipients(messageData);
-
-    // 5. Se não houver destinatários (ex: política disabled ou remetente é o único no grupo)
-    if (resolved.recipientUids.length === 0) {
-      await idempotencyRef.set({
-        messageId,
+    // Idempotência atômica: create() falha se o documento já existir, mesmo com requisições simultâneas
+    const claimRef = adminFirestore.collection('notifiedMessages').doc(`${conversationId}__${messageId}`);
+    try {
+      await claimRef.create({
         conversationId,
-        senderId: authenticatedUserId,
-        processedAt: Date.now(),
-        sentCount: 0,
+        messageId,
+        senderId: user.uid,
+        status: 'processing',
+        createdAt: Date.now(),
+      });
+    } catch (err) {
+      if (isAlreadyExistsError(err)) {
+        res.status(200).json({ success: true, duplicate: true, sentCount: 0 });
+        return;
+      }
+      throw err;
+    }
+
+    try {
+      const resolved = await resolveRecipients(conversationId, message);
+
+      if (resolved.policyUsed === 'rejected') {
+        await claimRef.update({ status: 'rejected', reason: resolved.reason ?? null, processedAt: Date.now() });
+        res.status(403).json({
+          error: 'forbidden',
+          message: 'O remetente não participa desta conversa.',
+        });
+        return;
+      }
+
+      // Texto curto: nome do remetente + prévia da mensagem (sem e-mail, telefone ou IDs)
+      const body =
+        message.conversationType === 'group'
+          ? `${resolved.senderName}: ${preview(message.text)}`
+          : preview(message.text);
+
+      const result = await sendPushNotifications({
+        recipientUids: resolved.recipientUids,
+        title: resolved.conversationTitle,
+        body,
+        payload: {
+          conversationId,
+          conversationType: message.conversationType,
+          messageId,
+        },
+      });
+
+      await claimRef.update({
+        status: 'sent',
         policyUsed: resolved.policyUsed,
+        recipientCount: resolved.recipientUids.length,
+        sentCount: result.sentCount,
+        failedCount: result.failedCount,
+        processedAt: Date.now(),
       });
 
       res.status(200).json({
         success: true,
-        message: 'Nenhum destinatário elegível para receber notificação conforme a política.',
         policyUsed: resolved.policyUsed,
-        sentCount: 0,
+        recipientCount: resolved.recipientUids.length,
+        sentCount: result.sentCount,
+        failedCount: result.failedCount,
       });
-      return;
+    } catch (err) {
+      // Libera a reserva para permitir uma nova tentativa
+      await claimRef.delete().catch(() => undefined);
+      throw err;
     }
-
-    // 6. Preparar texto e payload seguro da notificação
-    // Truncar mensagens muito longas para exibição no push
-    const notificationBody =
-      messageData.text.length > 120
-        ? `${messageData.text.substring(0, 117)}...`
-        : messageData.text;
-
-    // 7. Enviar notificações push
-    const result = await sendPushNotifications({
-      recipientUids: resolved.recipientUids,
-      title: resolved.conversationTitle,
-      body: notificationBody,
-      payload: {
-        conversationId,
-        conversationType: messageData.conversationType,
-        messageId,
-        senderId: messageData.senderId,
-      },
-    });
-
-    // 8. Registrar conclusão para idempotência
-    await idempotencyRef.set({
-      messageId,
-      conversationId,
-      senderId: authenticatedUserId,
-      processedAt: Date.now(),
-      sentCount: result.sentCount,
-      failedCount: result.failedCount,
-      recipients: resolved.recipientUids,
-      policyUsed: resolved.policyUsed,
-    });
-
-    res.status(200).json({
-      success: true,
-      sentCount: result.sentCount,
-      failedCount: result.failedCount,
-      recipientCount: resolved.recipientUids.length,
-      policyUsed: resolved.policyUsed,
-      conversationTitle: resolved.conversationTitle,
-    });
   } catch (error) {
-    const errorDetails = error instanceof Error ? error.message : String(error);
-    console.error('[NotificationRoute] Erro interno ao processar notificação:', errorDetails);
+    console.error('[Notifications] Erro ao processar notificação:', error);
     res.status(500).json({
-      error: 'Erro interno no servidor',
-      message: 'Falha ao processar o envio de notificações.',
-      details: errorDetails,
+      error: 'internal_error',
+      message: 'Não foi possível processar a notificação agora.',
     });
   }
 });

@@ -6,115 +6,144 @@ import {
   TouchableOpacity,
   StyleSheet,
   ScrollView,
-  Image,
   ActivityIndicator,
   Alert,
+  Platform,
 } from 'react-native';
 import { RouteProp, useNavigation, useRoute } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
 import { RootStackParamList } from '../types/navigation';
+import {
+  MAX_GROUP_LIMIT,
+  MAX_GROUP_NAME_LENGTH,
+  MIN_GROUP_LIMIT,
+  NotificationPolicy,
+} from '../types/group';
 import { useAuth } from '../hooks/useAuth';
 import { useGroups } from '../hooks/useGroups';
 import { getGroup } from '../services/groupService';
-import { NotificationPolicy } from '../types/group';
 import { colors } from '../theme/colors';
 import { ErrorMessage } from '../components/ErrorMessage';
+import { PhotoPicker } from '../components/PhotoPicker';
+import { PickedImage } from '../types/image';
 import { validateGroupCapacity } from '../utils/groupValidation';
+import { getFriendlyErrorMessage } from '../utils/errors';
 
 type GroupFormScreenNavigationProp = NativeStackNavigationProp<RootStackParamList, 'GroupForm'>;
 type GroupFormScreenRouteProp = RouteProp<RootStackParamList, 'GroupForm'>;
+
+const POLICY_OPTIONS: { value: NotificationPolicy; title: string; description: string }[] = [
+  {
+    value: 'all_group_messages',
+    title: 'Todas as mensagens (padrão)',
+    description: 'Notifica todos os integrantes, exceto quem enviou.',
+  },
+  {
+    value: 'mentioned_members',
+    title: 'Apenas mencionados (@)',
+    description: 'Notifica somente quem foi mencionado ou escolhido como destinatário.',
+  },
+  {
+    value: 'direct_messages_only',
+    title: 'Apenas conversas individuais',
+    description: 'Mensagens deste grupo não geram push; só as conversas individuais notificam.',
+  },
+  {
+    value: 'disabled',
+    title: 'Desativadas',
+    description: 'Nenhuma mensagem deste grupo gera notificação push.',
+  },
+];
+
+function showSuccess(message: string) {
+  if (Platform.OS !== 'web') Alert.alert('Grupo', message);
+}
 
 export const GroupFormScreen: React.FC = () => {
   const navigation = useNavigation<GroupFormScreenNavigationProp>();
   const route = useRoute<GroupFormScreenRouteProp>();
   const { user } = useAuth();
-  const { createNewGroup, modifyGroup } = useGroups();
+  const { createNewGroup, updateGroup } = useGroups();
 
   const groupId = route.params?.groupId;
+  const selectedFromParams = route.params?.selectedMemberIds;
   const isEditing = Boolean(groupId);
 
   const [name, setName] = useState<string>('');
-  const [photoUri, setPhotoUri] = useState<string | null>(null);
+  const [newPhoto, setNewPhoto] = useState<PickedImage | null>(null);
   const [existingPhotoUrl, setExistingPhotoUrl] = useState<string>('');
   const [memberIds, setMemberIds] = useState<string[]>([]);
+  const [ownerId, setOwnerId] = useState<string | null>(null);
   const [memberLimit, setMemberLimit] = useState<number>(5);
   const [policy, setPolicy] = useState<NotificationPolicy>('all_group_messages');
-  const [loading, setLoading] = useState<boolean>(false);
+  const [saving, setSaving] = useState<boolean>(false);
   const [initialLoading, setInitialLoading] = useState<boolean>(isEditing);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Carregar dados caso seja modo de edição
+  // Modo edição: carrega os dados atuais do grupo
   useEffect(() => {
-    async function loadGroupData() {
-      if (!groupId) return;
+    if (!groupId) return;
+    let cancelled = false;
+
+    (async () => {
       try {
         setInitialLoading(true);
         const group = await getGroup(groupId);
-        if (group) {
-          setName(group.name);
-          setExistingPhotoUrl(group.photoUrl);
-          setMemberIds(group.memberIds);
-          setMemberLimit(group.memberLimit);
-          setPolicy(group.notificationPolicy);
+        if (cancelled) return;
+        if (!group) {
+          setErrorMessage('Grupo não encontrado.');
+          return;
         }
+        setName(group.name);
+        setExistingPhotoUrl(group.photoUrl);
+        setMemberIds(group.memberIds);
+        setOwnerId(group.ownerId);
+        setMemberLimit(group.memberLimit);
+        setPolicy(group.notificationPolicy);
       } catch (err) {
-        console.error('[GroupFormScreen] Falha ao carregar dados do grupo:', err);
-        setErrorMessage('Erro ao carregar os dados do grupo.');
+        if (!cancelled) {
+          setErrorMessage(getFriendlyErrorMessage(err, 'Erro ao carregar os dados do grupo.'));
+        }
       } finally {
-        setInitialLoading(false);
+        if (!cancelled) setInitialLoading(false);
       }
-    }
+    })();
 
-    loadGroupData();
+    return () => {
+      cancelled = true;
+    };
   }, [groupId]);
 
-  // Total de integrantes incluindo o criador
+  // Retorno da tela de seleção de integrantes (modo criação)
+  useEffect(() => {
+    if (!selectedFromParams) return;
+    setMemberIds(selectedFromParams);
+    // Se a seleção passar do limite atual, o limite sobe junto (o usuário pode ajustar depois)
+    setMemberLimit((prev) => Math.max(prev, selectedFromParams.length + 1));
+  }, [selectedFromParams]);
+
+  const isOwner = !isEditing || (user !== null && ownerId === user.uid);
+
+  // Total de integrantes, incluindo o proprietário
   const totalMemberCount = useMemo(() => {
     if (!user) return memberIds.length;
-    const set = new Set([...memberIds, user.uid]);
-    return set.size;
+    return new Set([...memberIds, user.uid]).size;
   }, [memberIds, user]);
 
-  const capacityValidation = useMemo(() => {
-    return validateGroupCapacity(totalMemberCount, memberLimit);
-  }, [totalMemberCount, memberLimit]);
+  const capacityValidation = useMemo(
+    () => validateGroupCapacity(totalMemberCount, memberLimit),
+    [totalMemberCount, memberLimit]
+  );
 
-  const handlePickPhoto = async () => {
-    try {
-      const permissionResult = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (!permissionResult.granted) {
-        setErrorMessage('Permissão para acessar a galeria de fotos foi negada.');
-        return;
-      }
-
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ['images'],
-        allowsEditing: true,
-        aspect: [1, 1],
-        quality: 0.8,
-      });
-
-      if (!result.canceled && result.assets && result.assets.length > 0) {
-        setPhotoUri(result.assets[0].uri);
-      }
-    } catch (err) {
-      console.error('[GroupFormScreen] Erro ao selecionar imagem:', err);
-    }
-  };
+  const canDecreaseLimit = memberLimit > Math.max(totalMemberCount, MIN_GROUP_LIMIT);
+  const canIncreaseLimit = memberLimit < MAX_GROUP_LIMIT;
 
   const handleOpenMemberSelection = () => {
     navigation.navigate('Users', {
       mode: 'group_select',
-      selectedIds: memberIds,
-      onSelectMembers: (uids) => {
-        // Validação imediata de limite ao selecionar
-        if (uids.length + 1 > memberLimit) {
-          setMemberLimit(uids.length + 1);
-        }
-        setMemberIds(uids);
-      },
+      target: { screen: 'GroupForm' },
+      selectedIds: memberIds.filter((id) => id !== user?.uid),
     });
   };
 
@@ -122,52 +151,53 @@ export const GroupFormScreen: React.FC = () => {
     setErrorMessage(null);
 
     if (!name.trim()) {
-      setErrorMessage('Por favor, informe o nome do grupo.');
+      setErrorMessage('Informe o nome do grupo.');
       return;
     }
-
-    if (!isEditing && memberIds.length < 1) {
+    if (!isEditing && totalMemberCount < 2) {
       setErrorMessage('Selecione pelo menos mais um integrante para formar o grupo.');
       return;
     }
-
     if (!capacityValidation.valid) {
-      setErrorMessage(capacityValidation.error || 'Capacidade do grupo inválida.');
+      setErrorMessage(capacityValidation.error ?? 'Capacidade do grupo inválida.');
       return;
     }
 
-    setLoading(true);
+    setSaving(true);
     try {
       if (isEditing && groupId) {
-        await modifyGroup(groupId, {
-          name: name.trim(),
+        await updateGroup(groupId, {
+          name,
           memberLimit,
           notificationPolicy: policy,
-          ...(photoUri ? { photoUrl: photoUri } : {}),
+          photo: newPhoto,
         });
-        Alert.alert('Sucesso', 'Configurações do grupo atualizadas!');
+        showSuccess('Configurações do grupo atualizadas!');
         navigation.goBack();
       } else {
-        const newGroup = await createNewGroup({
-          name: name.trim(),
-          photoUri,
+        const result = await createNewGroup({
+          name,
+          photo: newPhoto,
           initialMemberIds: memberIds,
           memberLimit,
           notificationPolicy: policy,
         });
 
+        if (result.photoUploadFailed) {
+          showSuccess('Grupo criado, mas a foto não pôde ser enviada. Você pode trocá-la nas configurações.');
+        }
+
         navigation.replace('Chat', {
-          conversationId: newGroup.id,
+          conversationId: result.group.id,
           conversationType: 'group',
-          title: newGroup.name,
-          photoUrl: newGroup.photoUrl,
+          title: result.group.name,
+          photoUrl: result.group.photoUrl,
         });
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Falha ao salvar grupo.';
-      setErrorMessage(msg);
+      setErrorMessage(getFriendlyErrorMessage(err, 'Não foi possível salvar o grupo.'));
     } finally {
-      setLoading(false);
+      setSaving(false);
     }
   };
 
@@ -182,65 +212,73 @@ export const GroupFormScreen: React.FC = () => {
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       <Text style={styles.screenTitle}>
-        {isEditing ? 'Configurações do Grupo' : 'Criar Novo Grupo'}
+        {isEditing ? 'Configurações do grupo' : 'Criar novo grupo'}
       </Text>
 
       <ErrorMessage message={errorMessage || ''} onDismiss={() => setErrorMessage(null)} />
 
-      {/* Foto do Grupo */}
-      <View style={styles.photoSection}>
-        <TouchableOpacity style={styles.photoButton} onPress={handlePickPhoto}>
-          {photoUri || existingPhotoUrl ? (
-            <Image
-              source={{ uri: photoUri || existingPhotoUrl }}
-              style={styles.photoPreview}
-            />
-          ) : (
-            <View style={styles.photoPlaceholder}>
-              <Ionicons name="camera-outline" size={32} color={colors.primaryLight} />
-              <Text style={styles.photoPlaceholderText}>Foto do Grupo</Text>
-            </View>
-          )}
-        </TouchableOpacity>
-      </View>
+      {!isOwner && (
+        <ErrorMessage message="Apenas o proprietário pode alterar as configurações deste grupo." />
+      )}
 
-      {/* Nome do Grupo */}
-      <View style={styles.inputGroup}>
-        <Text style={styles.label}>Nome do Grupo</Text>
-        <TextInput
-          style={styles.input}
-          placeholder="Ex: FIAP - Trabalho Final"
-          placeholderTextColor={colors.textMuted}
-          value={name}
-          onChangeText={setName}
-          maxLength={40}
+      <View style={styles.photoSection}>
+        <PhotoPicker
+          image={newPhoto}
+          existingUrl={existingPhotoUrl}
+          label={isEditing ? 'Trocar foto' : 'Foto do grupo'}
+          accentColor={colors.badgeGroup}
+          onChange={setNewPhoto}
+          onError={setErrorMessage}
+          disabled={!isOwner || saving}
         />
       </View>
 
-      {/* Limite de Integrantes com Indicador de Vagas */}
+      <View style={styles.inputGroup}>
+        <Text style={styles.label}>Nome do grupo</Text>
+        <TextInput
+          style={styles.input}
+          placeholder="Ex: FIAP - Trabalho final"
+          placeholderTextColor={colors.textMuted}
+          value={name}
+          onChangeText={setName}
+          maxLength={MAX_GROUP_NAME_LENGTH}
+          editable={isOwner && !saving}
+        />
+      </View>
+
       <View style={styles.cardSection}>
         <View style={styles.cardHeader}>
-          <Text style={styles.label}>Limite Máximo de Integrantes</Text>
-          <View style={styles.vacanciesBadge}>
-            <Text style={styles.vacanciesText}>
-              {capacityValidation.availableVacancies} vaga(s) restante(s)
+          <Text style={styles.label}>Limite máximo de integrantes</Text>
+          <View
+            style={[
+              styles.vacanciesBadge,
+              capacityValidation.availableVacancies === 0 && styles.vacanciesBadgeFull,
+            ]}
+          >
+            <Text
+              style={[
+                styles.vacanciesText,
+                capacityValidation.availableVacancies === 0 && styles.vacanciesTextFull,
+              ]}
+            >
+              {capacityValidation.availableVacancies === 0
+                ? 'Sem vagas'
+                : `${capacityValidation.availableVacancies} vaga(s) disponível(is)`}
             </Text>
           </View>
         </View>
 
         <Text style={styles.helperText}>
-          Total atual: {totalMemberCount} integrante(s) (incluindo você). O limite não pode ser menor que a contagem atual.
+          Atual: {totalMemberCount} integrante(s), incluindo o proprietário. O limite não pode ser
+          menor que isso (máximo {MAX_GROUP_LIMIT}).
         </Text>
 
         <View style={styles.stepperRow}>
           <TouchableOpacity
-            style={[styles.stepperButton, memberLimit <= totalMemberCount && styles.stepperButtonDisabled]}
-            onPress={() => {
-              if (memberLimit > totalMemberCount && memberLimit > 2) {
-                setMemberLimit((prev) => prev - 1);
-              }
-            }}
-            disabled={memberLimit <= totalMemberCount}
+            style={[styles.stepperButton, (!canDecreaseLimit || !isOwner) && styles.stepperButtonDisabled]}
+            onPress={() => setMemberLimit((prev) => prev - 1)}
+            disabled={!canDecreaseLimit || !isOwner}
+            accessibilityLabel="Diminuir limite"
           >
             <Ionicons name="remove" size={20} color="#FFFFFF" />
           </TouchableOpacity>
@@ -248,118 +286,80 @@ export const GroupFormScreen: React.FC = () => {
           <Text style={styles.limitValue}>{memberLimit}</Text>
 
           <TouchableOpacity
-            style={styles.stepperButton}
+            style={[styles.stepperButton, (!canIncreaseLimit || !isOwner) && styles.stepperButtonDisabled]}
             onPress={() => setMemberLimit((prev) => prev + 1)}
+            disabled={!canIncreaseLimit || !isOwner}
+            accessibilityLabel="Aumentar limite"
           >
             <Ionicons name="add" size={20} color="#FFFFFF" />
           </TouchableOpacity>
         </View>
       </View>
 
-      {/* Seleção de Integrantes (apenas na criação) */}
-      {!isEditing && (
-        <View style={styles.cardSection}>
-          <View style={styles.cardHeader}>
-            <Text style={styles.label}>Integrantes Selecionados</Text>
-            <Text style={styles.memberCountText}>
-              {memberIds.length} selecionado(s)
-            </Text>
-          </View>
+      <View style={styles.cardSection}>
+        <View style={styles.cardHeader}>
+          <Text style={styles.label}>Integrantes</Text>
+          <Text style={styles.memberCountText}>{totalMemberCount} no grupo</Text>
+        </View>
 
+        {isEditing ? (
           <TouchableOpacity
             style={styles.selectMembersButton}
-            onPress={handleOpenMemberSelection}
+            onPress={() => groupId && navigation.navigate('GroupMembers', { groupId })}
           >
+            <Ionicons name="people-outline" size={20} color={colors.primaryLight} />
+            <Text style={styles.selectMembersText}>Gerenciar integrantes</Text>
+          </TouchableOpacity>
+        ) : (
+          <TouchableOpacity style={styles.selectMembersButton} onPress={handleOpenMemberSelection}>
             <Ionicons name="person-add-outline" size={20} color={colors.primaryLight} />
             <Text style={styles.selectMembersText}>
-              {memberIds.length === 0 ? 'Selecionar Integrantes' : 'Alterar Integrantes'}
+              {memberIds.length === 0 ? 'Selecionar integrantes' : 'Alterar integrantes'}
             </Text>
           </TouchableOpacity>
-        </View>
-      )}
+        )}
+      </View>
 
-      {/* Política de Notificações */}
       <View style={styles.cardSection}>
-        <Text style={styles.label}>Política de Push Notifications</Text>
+        <Text style={styles.label}>Política de notificações push</Text>
         <Text style={styles.helperText}>
-          Define quem receberá notificações push quando mensagens forem enviadas neste grupo.
+          Define quem recebe push quando alguém envia mensagem neste grupo.
         </Text>
 
         <View style={styles.policyOptions}>
-          <TouchableOpacity
-            style={[styles.policyCard, policy === 'all_group_messages' && styles.policyCardActive]}
-            onPress={() => setPolicy('all_group_messages')}
-          >
-            <Ionicons
-              name={policy === 'all_group_messages' ? 'radio-button-on' : 'radio-button-off'}
-              size={20}
-              color={policy === 'all_group_messages' ? colors.primaryLight : colors.textMuted}
-            />
-            <View style={styles.policyInfo}>
-              <Text style={styles.policyTitle}>Todas as mensagens (Padrão)</Text>
-              <Text style={styles.policyDesc}>Notifica todos os integrantes do grupo, exceto o remetente.</Text>
-            </View>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.policyCard, policy === 'mentioned_members' && styles.policyCardActive]}
-            onPress={() => setPolicy('mentioned_members')}
-          >
-            <Ionicons
-              name={policy === 'mentioned_members' ? 'radio-button-on' : 'radio-button-off'}
-              size={20}
-              color={policy === 'mentioned_members' ? colors.primaryLight : colors.textMuted}
-            />
-            <View style={styles.policyInfo}>
-              <Text style={styles.policyTitle}>Apenas menções (@)</Text>
-              <Text style={styles.policyDesc}>Notifica somente os integrantes explicitamente mencionados ou direcionados.</Text>
-            </View>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.policyCard, policy === 'direct_messages_only' && styles.policyCardActive]}
-            onPress={() => setPolicy('direct_messages_only')}
-          >
-            <Ionicons
-              name={policy === 'direct_messages_only' ? 'radio-button-on' : 'radio-button-off'}
-              size={20}
-              color={policy === 'direct_messages_only' ? colors.primaryLight : colors.textMuted}
-            />
-            <View style={styles.policyInfo}>
-              <Text style={styles.policyTitle}>Apenas conversas individuais</Text>
-              <Text style={styles.policyDesc}>Nenhuma mensagem deste grupo gera notificação push.</Text>
-            </View>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.policyCard, policy === 'disabled' && styles.policyCardActive]}
-            onPress={() => setPolicy('disabled')}
-          >
-            <Ionicons
-              name={policy === 'disabled' ? 'radio-button-on' : 'radio-button-off'}
-              size={20}
-              color={policy === 'disabled' ? colors.primaryLight : colors.textMuted}
-            />
-            <View style={styles.policyInfo}>
-              <Text style={styles.policyTitle}>Desativadas</Text>
-              <Text style={styles.policyDesc}>Desliga completamente o envio de notificações push para esta conversa.</Text>
-            </View>
-          </TouchableOpacity>
+          {POLICY_OPTIONS.map((option) => {
+            const selected = policy === option.value;
+            return (
+              <TouchableOpacity
+                key={option.value}
+                style={[styles.policyCard, selected && styles.policyCardActive]}
+                onPress={() => setPolicy(option.value)}
+                disabled={!isOwner}
+              >
+                <Ionicons
+                  name={selected ? 'radio-button-on' : 'radio-button-off'}
+                  size={20}
+                  color={selected ? colors.primaryLight : colors.textMuted}
+                />
+                <View style={styles.policyInfo}>
+                  <Text style={styles.policyTitle}>{option.title}</Text>
+                  <Text style={styles.policyDesc}>{option.description}</Text>
+                </View>
+              </TouchableOpacity>
+            );
+          })}
         </View>
       </View>
 
-      {/* Botão de Envio */}
       <TouchableOpacity
-        style={[styles.submitButton, loading && styles.submitButtonDisabled]}
+        style={[styles.submitButton, (saving || !isOwner) && styles.submitButtonDisabled]}
         onPress={handleSubmit}
-        disabled={loading}
+        disabled={saving || !isOwner}
       >
-        {loading ? (
+        {saving ? (
           <ActivityIndicator color="#FFFFFF" size="small" />
         ) : (
-          <Text style={styles.submitButtonText}>
-            {isEditing ? 'Salvar Alterações' : 'Criar Grupo'}
-          </Text>
+          <Text style={styles.submitButtonText}>{isEditing ? 'Salvar alterações' : 'Criar grupo'}</Text>
         )}
       </TouchableOpacity>
     </ScrollView>
@@ -390,32 +390,6 @@ const styles = StyleSheet.create({
   photoSection: {
     alignItems: 'center',
     marginBottom: 20,
-  },
-  photoButton: {
-    width: 96,
-    height: 96,
-    borderRadius: 48,
-    backgroundColor: colors.surfaceElevated,
-    borderWidth: 2,
-    borderColor: colors.badgeGroup,
-    borderStyle: 'dashed',
-    justifyContent: 'center',
-    alignItems: 'center',
-    overflow: 'hidden',
-  },
-  photoPreview: {
-    width: '100%',
-    height: '100%',
-  },
-  photoPlaceholder: {
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  photoPlaceholderText: {
-    fontSize: 11,
-    color: colors.primaryLight,
-    fontWeight: '600',
-    marginTop: 4,
   },
   inputGroup: {
     marginBottom: 18,
@@ -455,10 +429,16 @@ const styles = StyleSheet.create({
     paddingVertical: 3,
     borderRadius: 8,
   },
+  vacanciesBadgeFull: {
+    backgroundColor: colors.dangerMuted,
+  },
   vacanciesText: {
     color: colors.accent,
     fontSize: 12,
     fontWeight: '700',
+  },
+  vacanciesTextFull: {
+    color: colors.danger,
   },
   helperText: {
     fontSize: 12,
@@ -508,6 +488,7 @@ const styles = StyleSheet.create({
     gap: 8,
     borderWidth: 1,
     borderColor: colors.surfaceBorder,
+    marginTop: 10,
   },
   selectMembersText: {
     color: colors.primaryLight,

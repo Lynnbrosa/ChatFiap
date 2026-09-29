@@ -17,12 +17,15 @@ import { RootStackParamList } from '../types/navigation';
 import { useAuth } from '../hooks/useAuth';
 import { colors } from '../theme/colors';
 import { ErrorMessage } from '../components/ErrorMessage';
+import { NoticeBanner } from '../components/NoticeBanner';
+import { isFirebaseConfigured } from '../services/firebase';
+import { isValidEmail } from '../utils/validators';
 
 type LoginScreenNavigationProp = NativeStackNavigationProp<RootStackParamList, 'Login'>;
 
 export const LoginScreen: React.FC = () => {
   const navigation = useNavigation<LoginScreenNavigationProp>();
-  const { login, loading, authError, clearError } = useAuth();
+  const { login, actionLoading, authError, clearError } = useAuth();
 
   const [email, setEmail] = useState<string>('');
   const [password, setPassword] = useState<string>('');
@@ -34,23 +37,17 @@ export const LoginScreen: React.FC = () => {
     clearError();
 
     if (!email.trim() || !password) {
-      setLocalError('Por favor, informe seu e-mail e sua senha.');
+      setLocalError('Informe seu e-mail e sua senha.');
+      return;
+    }
+    if (!isValidEmail(email)) {
+      setLocalError('Formato de e-mail inválido.');
       return;
     }
 
-    try {
-      await login(email.trim(), password);
-      // Ao autenticar, o estado no AuthContext muda e navega para Conversations
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Falha ao autenticar.';
-      if (msg.includes('user-not-found') || msg.includes('wrong-password') || msg.includes('invalid-credential')) {
-        setLocalError('E-mail ou senha inválidos. Verifique suas credenciais.');
-      } else if (msg.includes('invalid-email')) {
-        setLocalError('Formato de e-mail inválido.');
-      } else {
-        setLocalError(msg);
-      }
-    }
+    // Em caso de sucesso o AuthContext troca a pilha para as telas autenticadas;
+    // em caso de falha a mensagem amigável fica em authError.
+    await login(email.trim(), password);
   };
 
   const activeError = localError || authError;
@@ -69,12 +66,24 @@ export const LoginScreen: React.FC = () => {
           <Text style={styles.subtitle}>Conversas individuais e em grupo em tempo real</Text>
         </View>
 
-        <ErrorMessage message={activeError || ''} onDismiss={() => { setLocalError(null); clearError(); }} />
+        {!isFirebaseConfigured && (
+          <NoticeBanner
+            message="O firebaseConfig.json ainda está com valores de exemplo. Siga o passo a passo do README."
+            tone="warning"
+          />
+        )}
+
+        <ErrorMessage
+          message={activeError || ''}
+          onDismiss={() => {
+            setLocalError(null);
+            clearError();
+          }}
+        />
 
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Entrar na conta</Text>
 
-          {/* Campo E-mail */}
           <View style={styles.inputGroup}>
             <Text style={styles.label}>E-mail</Text>
             <View style={styles.inputWrapper}>
@@ -88,11 +97,11 @@ export const LoginScreen: React.FC = () => {
                 autoCapitalize="none"
                 keyboardType="email-address"
                 autoComplete="email"
+                editable={!actionLoading}
               />
             </View>
           </View>
 
-          {/* Campo Senha */}
           <View style={styles.inputGroup}>
             <Text style={styles.label}>Senha</Text>
             <View style={styles.inputWrapper}>
@@ -104,10 +113,13 @@ export const LoginScreen: React.FC = () => {
                 value={password}
                 onChangeText={setPassword}
                 secureTextEntry={!showPassword}
+                editable={!actionLoading}
+                onSubmitEditing={handleLogin}
               />
               <TouchableOpacity
-                onPress={() => setShowPassword(!showPassword)}
+                onPress={() => setShowPassword((prev) => !prev)}
                 style={styles.eyeButton}
+                accessibilityLabel={showPassword ? 'Ocultar senha' : 'Mostrar senha'}
               >
                 <Ionicons
                   name={showPassword ? 'eye-off-outline' : 'eye-outline'}
@@ -118,23 +130,27 @@ export const LoginScreen: React.FC = () => {
             </View>
           </View>
 
-          {/* Botão de Login */}
           <TouchableOpacity
-            style={[styles.submitButton, loading && styles.submitButtonDisabled]}
+            style={[styles.submitButton, actionLoading && styles.submitButtonDisabled]}
             onPress={handleLogin}
-            disabled={loading}
+            disabled={actionLoading}
           >
-            {loading ? (
+            {actionLoading ? (
               <ActivityIndicator color="#FFFFFF" size="small" />
             ) : (
               <Text style={styles.submitButtonText}>Entrar</Text>
             )}
           </TouchableOpacity>
 
-          {/* Link para Cadastro */}
           <View style={styles.footerRow}>
             <Text style={styles.footerText}>Ainda não tem conta?</Text>
-            <TouchableOpacity onPress={() => navigation.navigate('Register')}>
+            <TouchableOpacity
+              onPress={() => {
+                clearError();
+                navigation.navigate('Register');
+              }}
+              disabled={actionLoading}
+            >
               <Text style={styles.registerLink}> Criar uma conta</Text>
             </TouchableOpacity>
           </View>

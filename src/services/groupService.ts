@@ -1,268 +1,316 @@
 import {
-  collection,
   doc,
   getDoc,
-  setDoc,
-  query,
-  where,
   onSnapshot,
+  query,
   runTransaction,
+  setDoc,
+  updateDoc,
+  where,
   Unsubscribe,
+  UpdateData,
 } from 'firebase/firestore';
 import { db } from './firebase';
-import { ChatGroup, NotificationPolicy } from '../types/group';
-import { uploadImage } from './userService';
+import { groupDoc, groupsCollection } from './converters';
+import { uploadGroupPhoto } from './imageUploadService';
+import { apiRequest } from './apiClient';
+import { ChatGroup, MAX_GROUP_NAME_LENGTH, NotificationPolicy } from '../types/group';
+import { PickedImage } from '../types/image';
+import { NotificationSettings } from '../types/notification';
+import { SyncGroupMembersResponse } from '../types/api';
+import { validateGroupCapacity } from '../utils/groupValidation';
+import { AppError } from '../utils/errors';
 
 export interface CreateGroupParams {
   name: string;
-  photoUri?: string | null;
+  photo?: PickedImage | null;
   initialMemberIds: string[];
   memberLimit: number;
   notificationPolicy: NotificationPolicy;
   ownerId: string;
 }
 
+export interface CreateGroupResult {
+  group: ChatGroup;
+  photoUploadFailed: boolean;
+  membersSyncFailed: boolean;
+}
+
+export interface UpdateGroupParams {
+  name?: string;
+  memberLimit?: number;
+  notificationPolicy?: NotificationPolicy;
+  /** Nova foto escolhida (enviada à API, que devolve a URL final). */
+  photo?: PickedImage | null;
+}
+
+function validateName(name: string): string {
+  const trimmed = name.trim();
+  if (!trimmed) throw new AppError('Informe o nome do grupo.');
+  if (trimmed.length > MAX_GROUP_NAME_LENGTH) {
+    throw new AppError(`O nome do grupo pode ter no máximo ${MAX_GROUP_NAME_LENGTH} caracteres.`);
+  }
+  return trimmed;
+}
+
+function assertValidLimit(memberCount: number, memberLimit: number): void {
+  const validation = validateGroupCapacity(memberCount, memberLimit);
+  if (!validation.valid) {
+    throw new AppError(validation.error ?? 'Limite de integrantes inválido.');
+  }
+}
+
 /**
- * Cria um novo grupo persistido no Cloud Firestore.
- * Valida capacidade inicial e proprietário.
+ * Atualiza o espelho de integrantes no Realtime Database através da API.
+ * As regras do RTDB usam esse espelho para liberar leitura/escrita de mensagens
+ * somente aos integrantes ativos (o RTDB não consegue consultar o Firestore).
  */
-export async function createGroup(params: CreateGroupParams): Promise<ChatGroup> {
-  const { name, photoUri, initialMemberIds, memberLimit, notificationPolicy, ownerId } = params;
+export async function syncGroupMembers(groupId: string): Promise<SyncGroupMembersResponse> {
+  return apiRequest<SyncGroupMembersResponse>(
+    `/groups/${encodeURIComponent(groupId)}/members/sync`,
+    { method: 'POST' }
+  );
+}
 
-  // Garante que o proprietário esteja incluído na lista de integrantes
-  const uniqueMembers = Array.from(new Set([ownerId, ...initialMemberIds]));
-
-  if (uniqueMembers.length < 2) {
-    throw new Error('O grupo precisa de pelo menos 2 integrantes (incluindo o proprietário).');
+async function trySyncGroupMembers(groupId: string): Promise<boolean> {
+  try {
+    await syncGroupMembers(groupId);
+    return true;
+  } catch (err) {
+    console.warn('[GroupService] Falha ao sincronizar integrantes com a API:', err);
+    return false;
   }
+}
 
-  if (memberLimit < uniqueMembers.length) {
-    throw new Error(
-      `O limite (${memberLimit}) não pode ser inferior à quantidade de integrantes iniciais (${uniqueMembers.length}).`
-    );
+/** Cria o grupo no Cloud Firestore com o usuário autenticado como proprietário. */
+export async function createGroup(params: CreateGroupParams): Promise<CreateGroupResult> {
+  const { photo, initialMemberIds, memberLimit, notificationPolicy, ownerId } = params;
+  const name = validateName(params.name);
+
+  // O proprietário sempre faz parte da lista de integrantes
+  const memberIds = Array.from(new Set([ownerId, ...initialMemberIds]));
+  if (memberIds.length < 2) {
+    throw new AppError('O grupo precisa de pelo menos 2 integrantes (incluindo você).');
   }
+  assertValidLimit(memberIds.length, memberLimit);
 
-  const groupDocRef = doc(collection(db, 'groups'));
-  const groupId = groupDocRef.id;
-
-  let photoUrl = '';
-  if (photoUri) {
-    try {
-      photoUrl = await uploadImage(photoUri, `groups/${groupId}/photo_${Date.now()}.jpg`);
-    } catch (err) {
-      console.warn('[GroupService] Falha ao enviar foto do grupo:', err);
-    }
-  }
-
+  const groupRef = doc(groupsCollection());
   const now = Date.now();
   const group: ChatGroup = {
-    id: groupId,
-    name: name.trim(),
-    photoUrl,
+    id: groupRef.id,
+    name,
+    photoUrl: '',
     ownerId,
-    memberIds: uniqueMembers,
+    memberIds,
     memberLimit,
     notificationPolicy,
+    notificationPolicyUpdatedBy: ownerId,
+    notificationPolicyUpdatedAt: now,
     createdAt: now,
     updatedAt: now,
   };
 
-  await setDoc(groupDocRef, group);
-  return group;
+  await setDoc(groupRef, group);
+
+  // A foto é enviada depois da criação: a API confere se quem envia é o proprietário do grupo
+  let photoUploadFailed = false;
+  if (photo) {
+    try {
+      const photoUrl = await uploadGroupPhoto(group.id, photo);
+      await updateDoc(groupRef, { photoUrl, updatedAt: Date.now() });
+      group.photoUrl = photoUrl;
+    } catch (err) {
+      console.warn('[GroupService] Falha ao enviar a foto do grupo:', err);
+      photoUploadFailed = true;
+    }
+  }
+
+  const membersSyncFailed = !(await trySyncGroupMembers(group.id));
+  return { group, photoUploadFailed, membersSyncFailed };
 }
 
 /**
- * Adiciona um integrante ao grupo utilizando uma TRANSAÇÃO ATÔMICA DO FIRESTORE.
- * Garante proteção estrita contra concorrência e impede estouro do limite máximo
- * mesmo sob múltiplas requisições simultâneas.
- */
-export async function addMemberToGroup(groupId: string, newMemberId: string): Promise<void> {
-  const groupDocRef = doc(db, 'groups', groupId);
-
-  await runTransaction(db, async (transaction) => {
-    const groupSnap = await transaction.get(groupDocRef);
-
-    if (!groupSnap.exists()) {
-      throw new Error('Grupo não encontrado.');
-    }
-
-    const groupData = groupSnap.data() as ChatGroup;
-    const currentMembers = groupData.memberIds || [];
-    const limit = groupData.memberLimit;
-
-    if (currentMembers.includes(newMemberId)) {
-      throw new Error('O usuário já é integrante deste grupo.');
-    }
-
-    if (currentMembers.length >= limit) {
-      throw new Error(`Limite máximo de ${limit} integrantes já atingido. Nenhuma vaga disponível.`);
-    }
-
-    const updatedMembers = [...currentMembers, newMemberId];
-    transaction.update(groupDocRef, {
-      memberIds: updatedMembers,
-      updatedAt: Date.now(),
-    });
-  });
-}
-
-/**
- * Adiciona múltiplos integrantes ao grupo via TRANSAÇÃO ATÔMICA,
- * garantindo que o lote não ultrapasse o limite configurado.
+ * Adiciona integrantes numa TRANSAÇÃO do Firestore.
+ * A transação lê o documento, valida proprietário e vagas e grava a nova lista; se outra
+ * requisição alterar o grupo no meio do caminho, o Firestore repete a transação com os
+ * dados novos. Além disso, a regra `memberIds.size() <= memberLimit` é avaliada no servidor
+ * em toda escrita — nenhuma combinação de requisições concorrentes ultrapassa o limite.
  */
 export async function addMembersToGroup(
   groupId: string,
   newMemberIds: string[],
   requesterId: string
 ): Promise<void> {
-  const groupDocRef = doc(db, 'groups', groupId);
+  const ref = groupDoc(groupId);
 
   await runTransaction(db, async (transaction) => {
-    const groupSnap = await transaction.get(groupDocRef);
+    const snap = await transaction.get(ref);
+    if (!snap.exists()) throw new AppError('Grupo não encontrado.');
 
-    if (!groupSnap.exists()) {
-      throw new Error('Grupo não encontrado.');
+    const group = snap.data();
+    if (group.ownerId !== requesterId) {
+      throw new AppError('Apenas o proprietário do grupo pode adicionar integrantes.');
     }
 
-    const groupData = groupSnap.data() as ChatGroup;
+    const toAdd = newMemberIds.filter((id) => !group.memberIds.includes(id));
+    if (toAdd.length === 0) return;
 
-    if (groupData.ownerId !== requesterId) {
-      throw new Error('Apenas o proprietário do grupo pode adicionar novos integrantes.');
+    const vacancies = group.memberLimit - group.memberIds.length;
+    if (vacancies <= 0) {
+      throw new AppError(`O grupo já atingiu o limite de ${group.memberLimit} integrantes.`);
     }
-
-    const currentMembers = groupData.memberIds || [];
-    const limit = groupData.memberLimit;
-
-    const toAdd = newMemberIds.filter((id) => !currentMembers.includes(id));
-    if (toAdd.length === 0) {
-      return;
-    }
-
-    if (currentMembers.length + toAdd.length > limit) {
-      const vacancies = Math.max(0, limit - currentMembers.length);
-      throw new Error(
-        `Capacidade insuficiente. Vagas disponíveis: ${vacancies}, tentando adicionar: ${toAdd.length}.`
+    if (toAdd.length > vacancies) {
+      throw new AppError(
+        `Vagas insuficientes: há ${vacancies} vaga(s) e você tentou adicionar ${toAdd.length}.`
       );
     }
 
-    const updatedMembers = [...currentMembers, ...toAdd];
-    transaction.update(groupDocRef, {
-      memberIds: updatedMembers,
+    transaction.update(ref, {
+      memberIds: [...group.memberIds, ...toAdd],
       updatedAt: Date.now(),
     });
   });
+
+  await trySyncGroupMembers(groupId);
 }
 
 /**
- * Remove um integrante do grupo. Apenas o proprietário ou o próprio integrante (ao sair)
- * pode executar esta ação.
+ * Remove um integrante. O proprietário pode remover qualquer outro integrante;
+ * um integrante comum só pode remover a si mesmo (sair do grupo).
  */
 export async function removeMemberFromGroup(
   groupId: string,
   memberIdToRemove: string,
   requesterId: string
 ): Promise<void> {
-  const groupDocRef = doc(db, 'groups', groupId);
+  const ref = groupDoc(groupId);
 
   await runTransaction(db, async (transaction) => {
-    const groupSnap = await transaction.get(groupDocRef);
+    const snap = await transaction.get(ref);
+    if (!snap.exists()) throw new AppError('Grupo não encontrado.');
 
-    if (!groupSnap.exists()) {
-      throw new Error('Grupo não encontrado.');
-    }
-
-    const groupData = groupSnap.data() as ChatGroup;
-
-    const isOwner = groupData.ownerId === requesterId;
+    const group = snap.data();
+    const isOwner = group.ownerId === requesterId;
     const isSelf = memberIdToRemove === requesterId;
 
     if (!isOwner && !isSelf) {
-      throw new Error('Você não tem permissão para remover este integrante.');
+      throw new AppError('Você não tem permissão para remover este integrante.');
     }
-
-    if (memberIdToRemove === groupData.ownerId && groupData.memberIds.length > 1) {
-      throw new Error('O proprietário não pode sair sem transferir o grupo ou ser o último membro.');
+    if (memberIdToRemove === group.ownerId) {
+      throw new AppError('O proprietário não pode ser removido do grupo.');
     }
+    if (!group.memberIds.includes(memberIdToRemove)) return;
 
-    const updatedMembers = groupData.memberIds.filter((id) => id !== memberIdToRemove);
-    transaction.update(groupDocRef, {
-      memberIds: updatedMembers,
+    transaction.update(ref, {
+      memberIds: group.memberIds.filter((id) => id !== memberIdToRemove),
       updatedAt: Date.now(),
     });
   });
+
+  // Sem essa sincronização o integrante removido continuaria lendo mensagens novas no RTDB
+  const synced = await trySyncGroupMembers(groupId);
+  if (!synced) {
+    throw new AppError(
+      'O integrante foi removido, mas não foi possível atualizar o acesso às mensagens. Tente novamente.'
+    );
+  }
 }
 
 /**
- * Atualiza configurações do grupo (nome, limite, foto ou política de notificações).
- * O limite não pode ser reduzido para menos que a quantidade atual de integrantes.
+ * Atualiza as configurações do grupo (somente proprietário).
+ * O limite não pode ficar menor que a quantidade atual de integrantes.
  */
-export async function updateGroup(
+export async function updateGroupSettings(
   groupId: string,
-  updates: Partial<Pick<ChatGroup, 'name' | 'photoUrl' | 'memberLimit' | 'notificationPolicy'>>,
+  updates: UpdateGroupParams,
   requesterId: string
 ): Promise<void> {
-  const groupDocRef = doc(db, 'groups', groupId);
+  const ref = groupDoc(groupId);
+
+  // Envia a foto antes da transação (a API confere se quem envia é o proprietário)
+  let photoUrl: string | undefined;
+  if (updates.photo) {
+    photoUrl = await uploadGroupPhoto(groupId, updates.photo);
+  }
 
   await runTransaction(db, async (transaction) => {
-    const groupSnap = await transaction.get(groupDocRef);
+    const snap = await transaction.get(ref);
+    if (!snap.exists()) throw new AppError('Grupo não encontrado.');
 
-    if (!groupSnap.exists()) {
-      throw new Error('Grupo não encontrado.');
+    const group = snap.data();
+    if (group.ownerId !== requesterId) {
+      throw new AppError('Apenas o proprietário pode alterar as configurações do grupo.');
     }
 
-    const groupData = groupSnap.data() as ChatGroup;
+    const now = Date.now();
+    const changes: UpdateData<ChatGroup> = { updatedAt: now };
 
-    if (groupData.ownerId !== requesterId) {
-      throw new Error('Apenas o proprietário pode alterar as configurações do grupo.');
-    }
+    if (updates.name !== undefined) changes.name = validateName(updates.name);
+    if (photoUrl) changes.photoUrl = photoUrl;
 
     if (updates.memberLimit !== undefined) {
-      if (!Number.isInteger(updates.memberLimit)) {
-        throw new Error('O limite de integrantes deve ser um número inteiro.');
-      }
-      if (updates.memberLimit < groupData.memberIds.length) {
-        throw new Error(
-          `O limite não pode ser menor que o total atual de integrantes (${groupData.memberIds.length}).`
-        );
-      }
+      assertValidLimit(group.memberIds.length, updates.memberLimit);
+      changes.memberLimit = updates.memberLimit;
     }
 
-    transaction.update(groupDocRef, {
-      ...updates,
-      updatedAt: Date.now(),
-    });
+    if (updates.notificationPolicy && updates.notificationPolicy !== group.notificationPolicy) {
+      const settings: NotificationSettings = {
+        conversationId: groupId,
+        policy: updates.notificationPolicy,
+        updatedBy: requesterId,
+        updatedAt: now,
+      };
+      changes.notificationPolicy = settings.policy;
+      changes.notificationPolicyUpdatedBy = settings.updatedBy;
+      changes.notificationPolicyUpdatedAt = settings.updatedAt;
+    }
+
+    transaction.update(ref, changes);
   });
 }
 
-/**
- * Busca os dados de um grupo pelo ID
- */
-export async function getGroup(groupId: string): Promise<ChatGroup | null> {
-  const groupDocRef = doc(db, 'groups', groupId);
-  const snap = await getDoc(groupDocRef);
-  if (snap.exists()) {
-    return snap.data() as ChatGroup;
-  }
-  return null;
+/** Política de notificação atual do grupo no formato NotificationSettings. */
+export function getNotificationSettings(group: ChatGroup): NotificationSettings {
+  return {
+    conversationId: group.id,
+    policy: group.notificationPolicy,
+    updatedBy: group.notificationPolicyUpdatedBy ?? group.ownerId,
+    updatedAt: group.notificationPolicyUpdatedAt ?? group.createdAt,
+  };
 }
 
-/**
- * Escuta em tempo real os grupos dos quais o usuário autenticado participa
- */
+export async function getGroup(groupId: string): Promise<ChatGroup | null> {
+  const snap = await getDoc(groupDoc(groupId));
+  return snap.exists() ? snap.data() : null;
+}
+
+/** Escuta um grupo em tempo real (nome, foto, integrantes, limite e política). */
+export function listenGroup(
+  groupId: string,
+  onData: (group: ChatGroup | null) => void,
+  onError: (error: Error) => void
+): Unsubscribe {
+  return onSnapshot(
+    groupDoc(groupId),
+    (snap) => onData(snap.exists() ? snap.data() : null),
+    onError
+  );
+}
+
+/** Escuta em tempo real os grupos dos quais o usuário participa. */
 export function listenUserGroups(
   userId: string,
-  callback: (groups: ChatGroup[]) => void
+  onData: (groups: ChatGroup[]) => void,
+  onError: (error: Error) => void
 ): Unsubscribe {
-  const groupsRef = collection(db, 'groups');
-  const q = query(groupsRef, where('memberIds', 'array-contains', userId));
+  const q = query(groupsCollection(), where('memberIds', 'array-contains', userId));
 
-  return onSnapshot(q, (snapshot) => {
-    const list: ChatGroup[] = [];
-    snapshot.forEach((d) => {
-      list.push(d.data() as ChatGroup);
-    });
-    // Ordenar pelo mais recentemente atualizado
-    list.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-    callback(list);
-  });
+  return onSnapshot(
+    q,
+    (snapshot) => {
+      const list = snapshot.docs.map((d) => d.data()).sort((a, b) => b.updatedAt - a.updatedAt);
+      onData(list);
+    },
+    onError
+  );
 }

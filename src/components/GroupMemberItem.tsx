@@ -3,11 +3,12 @@ import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { colors } from '../theme/colors';
 import { Avatar } from './Avatar';
-import { ChatUser } from '../types/user';
+import { PublicUserProfile } from '../types/user';
 
 interface GroupMemberItemProps {
-  member: ChatUser;
+  member: PublicUserProfile;
   isOwner: boolean;
+  isCurrentUser: boolean;
   canRemove: boolean;
   onPressProfile: () => void;
   onRemove?: () => void;
@@ -16,6 +17,7 @@ interface GroupMemberItemProps {
 export const GroupMemberItem: React.FC<GroupMemberItemProps> = ({
   member,
   isOwner,
+  isCurrentUser,
   canRemove,
   onPressProfile,
   onRemove,
@@ -32,6 +34,7 @@ export const GroupMemberItem: React.FC<GroupMemberItemProps> = ({
           <View style={styles.nameRow}>
             <Text style={styles.name} numberOfLines={1}>
               {member.name}
+              {isCurrentUser ? ' (você)' : ''}
             </Text>
             {isOwner && (
               <View style={styles.ownerBadge}>
@@ -41,7 +44,7 @@ export const GroupMemberItem: React.FC<GroupMemberItemProps> = ({
             )}
           </View>
           <Text style={styles.email} numberOfLines={1}>
-            {member.email}
+            {isOwner ? 'Proprietário do grupo' : 'Integrante'} • toque para ver o perfil
           </Text>
         </View>
       </TouchableOpacity>

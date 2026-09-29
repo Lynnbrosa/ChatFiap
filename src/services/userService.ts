@@ -1,93 +1,95 @@
+import { getDoc, getDocs, limit, orderBy, query, setDoc, writeBatch } from 'firebase/firestore';
+import { db } from './firebase';
 import {
-  doc,
-  getDoc,
-  setDoc,
-  collection,
-  getDocs,
-  query,
-  limit,
-} from 'firebase/firestore';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import { db, storage } from './firebase';
-import { ChatUser, DeviceTokenRecord } from '../types/user';
+  deviceDoc,
+  privateProfileDoc,
+  publicProfileDoc,
+  usersCollection,
+} from './converters';
+import { apiRequest } from './apiClient';
+import { ChatUser, DevicePlatform, PublicUserProfile } from '../types/user';
+import { SharedProfileResponse } from '../types/api';
 
-/**
- * Busca os dados do perfil de um usuário no Firestore
- */
-export async function getUserProfile(uid: string): Promise<ChatUser | null> {
+/** Perfil público (nome e foto) de qualquer usuário autenticado. */
+export async function getPublicProfile(uid: string): Promise<PublicUserProfile | null> {
   if (!uid) return null;
-  const userDocRef = doc(db, 'users', uid);
-  const snap = await getDoc(userDocRef);
+  const snap = await getDoc(publicProfileDoc(uid));
+  return snap.exists() ? snap.data() : null;
+}
 
-  if (snap.exists()) {
-    return snap.data() as ChatUser;
-  }
-  return null;
+/** Perfil completo do próprio usuário (parte pública + dados cadastrais privados). */
+export async function getOwnProfile(uid: string): Promise<ChatUser | null> {
+  const [publicSnap, privateSnap] = await Promise.all([
+    getDoc(publicProfileDoc(uid)),
+    getDoc(privateProfileDoc(uid)),
+  ]);
+
+  if (!publicSnap.exists()) return null;
+
+  const publicData = publicSnap.data();
+  const privateData = privateSnap.exists() ? privateSnap.data() : null;
+
+  return {
+    ...publicData,
+    email: privateData?.email ?? '',
+    phoneNumber: privateData?.phoneNumber ?? '',
+    birthDate: privateData?.birthDate ?? '',
+  };
 }
 
 /**
- * Salva ou atualiza os dados cadastrais do perfil no Firestore
+ * Perfil completo de outro usuário. Buscado pela API, que só devolve os dados
+ * cadastrais se existir uma conversa individual ou um grupo em comum.
  */
+export async function getSharedUserProfile(uid: string): Promise<ChatUser> {
+  const response = await apiRequest<SharedProfileResponse>(
+    `/users/${encodeURIComponent(uid)}/profile`,
+    { method: 'GET', timeoutMs: 60000 }
+  );
+  return response.profile;
+}
+
+/** Grava a parte pública e a parte privada do perfil numa única operação atômica. */
 export async function saveUserProfile(user: ChatUser): Promise<void> {
-  const userDocRef = doc(db, 'users', user.uid);
-  await setDoc(userDocRef, user, { merge: true });
-}
-
-/**
- * Lista outros usuários cadastrados no aplicativo, excluindo o próprio usuário logado
- */
-export async function getUsersList(currentUid: string): Promise<ChatUser[]> {
-  const usersRef = collection(db, 'users');
-  const q = query(usersRef, limit(50));
-  const snap = await getDocs(q);
-
-  const users: ChatUser[] = [];
-  snap.forEach((d) => {
-    if (d.id !== currentUid) {
-      users.push(d.data() as ChatUser);
-    }
+  const batch = writeBatch(db);
+  batch.set(publicProfileDoc(user.uid), {
+    uid: user.uid,
+    name: user.name,
+    photoUrl: user.photoUrl,
+    createdAt: user.createdAt,
   });
-
-  return users;
+  batch.set(privateProfileDoc(user.uid), {
+    email: user.email,
+    phoneNumber: user.phoneNumber,
+    birthDate: user.birthDate,
+  });
+  await batch.commit();
 }
 
-/**
- * Faz upload de imagem selecionada no dispositivo para o Firebase Storage
- * e retorna a URL pública de download.
- * Atende ao requisito: apenas a URL é armazenada no Firestore; nunca Base64.
- */
-export async function uploadImage(localUri: string, path: string): Promise<string> {
-  try {
-    const response = await fetch(localUri);
-    const blob = await response.blob();
-
-    const storageRef = ref(storage, path);
-    await uploadBytes(storageRef, blob);
-
-    const downloadUrl = await getDownloadURL(storageRef);
-    return downloadUrl;
-  } catch (error) {
-    console.error('[UserService] Falha ao enviar imagem para o Storage:', error);
-    throw new Error('Falha no upload da imagem para o Firebase Storage.');
-  }
+/** Lista os usuários cadastrados (apenas dados públicos), sem o próprio usuário. */
+export async function listUsers(currentUid: string): Promise<PublicUserProfile[]> {
+  const snap = await getDocs(query(usersCollection(), orderBy('name'), limit(200)));
+  return snap.docs.map((d) => d.data()).filter((u) => u.uid !== currentUid);
 }
 
-/**
- * Registra ou atualiza o token de push do dispositivo na subcoleção privada do usuário
- */
-export async function registerDeviceTokenInFirestore(
+/** Registra/atualiza o token de push do dispositivo na subcoleção privada do usuário. */
+export async function registerDeviceToken(
   uid: string,
   deviceId: string,
   token: string,
-  platform: 'ios' | 'android' | 'web'
+  platform: DevicePlatform
 ): Promise<void> {
-  const deviceDocRef = doc(db, 'users', uid, 'devices', deviceId);
-  const payload: DeviceTokenRecord = {
+  await setDoc(deviceDoc(uid, deviceId), {
     token,
     platform,
     enabled: true,
     updatedAt: Date.now(),
-  };
+  });
+}
 
-  await setDoc(deviceDocRef, payload, { merge: true });
+/** Desativa o token do dispositivo (usado no logout) para que ele pare de receber push. */
+export async function disableDeviceToken(uid: string, deviceId: string): Promise<void> {
+  const snap = await getDoc(deviceDoc(uid, deviceId));
+  if (!snap.exists()) return;
+  await setDoc(deviceDoc(uid, deviceId), { ...snap.data(), enabled: false, updatedAt: Date.now() });
 }

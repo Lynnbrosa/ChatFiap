@@ -1,175 +1,90 @@
 import { adminFirestore } from './firebaseAdmin';
-
-export type NotificationPolicy =
-  | 'all_group_messages'
-  | 'mentioned_members'
-  | 'direct_messages_only'
-  | 'disabled';
-
-export type MessageTarget =
-  | { type: 'conversation' }
-  | { type: 'member'; memberId: string };
-
-export interface MessageRecord {
-  id: string;
-  conversationId: string;
-  conversationType: 'direct' | 'group';
-  senderId: string;
-  senderName?: string;
-  text: string;
-  target?: MessageTarget;
-  mentionedUserIds?: string[];
-  createdAt: number;
-}
-
-export interface GroupRecord {
-  id: string;
-  name: string;
-  photoUrl: string;
-  ownerId: string;
-  memberIds: string[];
-  memberLimit: number;
-  notificationPolicy: NotificationPolicy;
-  createdAt: number;
-  updatedAt: number;
-}
-
-export interface DirectConversationRecord {
-  id: string;
-  type: 'direct';
-  participantIds: [string, string];
-  createdAt: number;
-}
+import { MessageRecord, NotificationPolicy, parseGroupRecord, readStringArray } from './types';
 
 export interface ResolvedRecipients {
   recipientUids: string[];
   conversationTitle: string;
-  policyUsed: string;
+  senderName: string;
+  policyUsed: NotificationPolicy | 'direct' | 'rejected';
+  /** Motivo quando nada é enviado (útil nos logs e na resposta). */
+  reason?: string;
+}
+
+async function getUserName(uid: string): Promise<string> {
+  const snap = await adminFirestore.collection('users').doc(uid).get();
+  const name = snap.get('name');
+  return typeof name === 'string' && name.length > 0 ? name : 'Nova mensagem';
 }
 
 /**
- * Resolve com segurança os destinatários de uma notificação a partir das regras de negócio
- * e políticas configuradas no Firestore, sem confiar no cliente.
+ * Calcula NO SERVIDOR quem pode receber o push da mensagem, a partir dos dados do Firestore.
+ * Nunca usa uma lista de destinatários enviada pelo aplicativo.
  */
 export async function resolveRecipients(
+  conversationId: string,
   message: MessageRecord
 ): Promise<ResolvedRecipients> {
-  const { conversationId, conversationType, senderId, target, mentionedUserIds } = message;
+  const { senderId } = message;
+  const senderName = await getUserName(senderId);
 
-  if (conversationType === 'direct') {
-    const directDoc = await adminFirestore
-      .collection('directConversations')
-      .doc(conversationId)
-      .get();
-
+  if (message.conversationType === 'direct') {
+    const directDoc = await adminFirestore.collection('directConversations').doc(conversationId).get();
     if (!directDoc.exists) {
-      console.warn(`[RecipientResolver] Conversa direta ${conversationId} não encontrada no Firestore.`);
-      return {
-        recipientUids: [],
-        conversationTitle: 'Mensagem privada',
-        policyUsed: 'direct_conversation_not_found',
-      };
+      return { recipientUids: [], conversationTitle: senderName, senderName, policyUsed: 'rejected', reason: 'direct_not_found' };
     }
 
-    const directData = directDoc.data() as DirectConversationRecord;
-    const participantIds = directData.participantIds || [];
+    const participantIds = readStringArray(directDoc.get('participantIds'));
+    // Apenas participantes: o remetente precisa fazer parte da conversa
+    if (participantIds.length !== 2 || !participantIds.includes(senderId)) {
+      return { recipientUids: [], conversationTitle: senderName, senderName, policyUsed: 'rejected', reason: 'sender_not_participant' };
+    }
 
-    // O remetente nunca deve receber notificação da própria mensagem
-    const otherParticipant = participantIds.find((uid) => uid !== senderId);
-
+    // O remetente nunca recebe o próprio push
+    const recipient = participantIds.find((uid) => uid !== senderId);
     return {
-      recipientUids: otherParticipant ? [otherParticipant] : [],
-      conversationTitle: message.senderName || 'Nova mensagem direta',
-      policyUsed: 'direct_default',
+      recipientUids: recipient ? [recipient] : [],
+      conversationTitle: senderName,
+      senderName,
+      policyUsed: 'direct',
     };
   }
 
-  if (conversationType === 'group') {
-    const groupDoc = await adminFirestore.collection('groups').doc(conversationId).get();
+  const groupDoc = await adminFirestore.collection('groups').doc(conversationId).get();
+  const group = groupDoc.exists ? parseGroupRecord(groupDoc.id, groupDoc.data()) : null;
+  if (!group) {
+    return { recipientUids: [], conversationTitle: 'Grupo', senderName, policyUsed: 'rejected', reason: 'group_not_found' };
+  }
 
-    if (!groupDoc.exists) {
-      console.warn(`[RecipientResolver] Grupo ${conversationId} não encontrado no Firestore.`);
-      return {
-        recipientUids: [],
-        conversationTitle: 'Mensagem de grupo',
-        policyUsed: 'group_not_found',
-      };
+  if (!group.memberIds.includes(senderId)) {
+    return { recipientUids: [], conversationTitle: group.name, senderName, policyUsed: 'rejected', reason: 'sender_not_member' };
+  }
+
+  const otherMembers = group.memberIds.filter((uid) => uid !== senderId);
+  let recipients: string[] = [];
+
+  switch (group.notificationPolicy) {
+    case 'all_group_messages':
+      recipients = otherMembers;
+      break;
+
+    case 'mentioned_members': {
+      const selected = new Set<string>(message.mentionedUserIds);
+      if (message.target.type === 'member') selected.add(message.target.memberId);
+      // Só integrantes ativos, nunca o remetente
+      recipients = otherMembers.filter((uid) => selected.has(uid));
+      break;
     }
 
-    const groupData = groupDoc.data() as GroupRecord;
-    const memberIds = groupData.memberIds || [];
-    const policy = groupData.notificationPolicy || 'all_group_messages';
-
-    // Validação de segurança: apenas integrantes ativos do grupo podem ter mensagens notificadas
-    if (!memberIds.includes(senderId)) {
-      console.warn(`[RecipientResolver] Remetente ${senderId} não é membro ativo do grupo ${conversationId}.`);
-      return {
-        recipientUids: [],
-        conversationTitle: groupData.name || 'Grupo',
-        policyUsed: 'sender_not_a_member',
-      };
-    }
-
-    let calculatedRecipients: string[] = [];
-
-    switch (policy) {
-      case 'disabled':
-        // Nenhuma notificação enviada
-        calculatedRecipients = [];
-        break;
-
-      case 'direct_messages_only':
-        // Apenas DMs geram push; grupo desativado
-        calculatedRecipients = [];
-        break;
-
-      case 'all_group_messages':
-        // Todos os integrantes exceto o remetente
-        calculatedRecipients = memberIds.filter((uid) => uid !== senderId);
-        break;
-
-      case 'mentioned_members': {
-        const recipientsSet = new Set<string>();
-
-        // Integrante selecionado como target explícito
-        if (
-          target &&
-          target.type === 'member' &&
-          target.memberId &&
-          target.memberId !== senderId &&
-          memberIds.includes(target.memberId)
-        ) {
-          recipientsSet.add(target.memberId);
-        }
-
-        // Integrantes mencionados na lista mentionedUserIds
-        if (Array.isArray(mentionedUserIds)) {
-          for (const uid of mentionedUserIds) {
-            if (uid !== senderId && memberIds.includes(uid)) {
-              recipientsSet.add(uid);
-            }
-          }
-        }
-
-        calculatedRecipients = Array.from(recipientsSet);
-        break;
-      }
-
-      default:
-        calculatedRecipients = memberIds.filter((uid) => uid !== senderId);
-        break;
-    }
-
-    return {
-      recipientUids: calculatedRecipients,
-      conversationTitle: groupData.name || 'Mensagem do Grupo',
-      policyUsed: policy,
-    };
+    case 'direct_messages_only':
+    case 'disabled':
+      recipients = [];
+      break;
   }
 
   return {
-    recipientUids: [],
-    conversationTitle: 'Nova mensagem',
-    policyUsed: 'unknown_type',
+    recipientUids: recipients,
+    conversationTitle: group.name,
+    senderName,
+    policyUsed: group.notificationPolicy,
   };
 }

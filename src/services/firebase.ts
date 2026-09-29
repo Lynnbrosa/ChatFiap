@@ -1,28 +1,29 @@
-import { initializeApp, getApps, getApp, FirebaseApp } from 'firebase/app';
-import { initializeAuth, getReactNativePersistence, getAuth, Auth } from 'firebase/auth';
-import { getFirestore, Firestore } from 'firebase/firestore';
-import { getDatabase, Database } from 'firebase/database';
-import { getStorage, FirebaseStorage } from 'firebase/storage';
+import { initializeApp, getApps, getApp, FirebaseApp, FirebaseOptions } from 'firebase/app';
+import {
+  initializeAuth,
+  getReactNativePersistence,
+  getAuth,
+  connectAuthEmulator,
+  Auth,
+} from 'firebase/auth';
+import { getFirestore, connectFirestoreEmulator, Firestore } from 'firebase/firestore';
+import { getDatabase, connectDatabaseEmulator, Database } from 'firebase/database';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import rawFirebaseConfig from '../../firebaseConfig.json';
+import { FIREBASE_EMULATOR_HOST, USE_FIREBASE_EMULATORS } from '../config/env';
 
-// Importa a configuração do SDK cliente conforme obrigatório no enunciado
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const rawConfig = require('../../firebaseConfig.json');
+// Configuração do SDK cliente versionada no repositório (firebaseConfig.json).
+// Contém apenas identificadores públicos do projeto — nenhuma credencial administrativa.
+const firebaseConfig: FirebaseOptions = rawFirebaseConfig;
 
-const firebaseConfig = {
-  apiKey: rawConfig.apiKey || 'AIzaSyFakeKeyForFiapProjectValidation-X1Y2Z3',
-  authDomain: rawConfig.authDomain || 'fiap-chat-production.firebaseapp.com',
-  databaseURL: rawConfig.databaseURL || 'https://fiap-chat-production-default-rtdb.firebaseio.com',
-  projectId: rawConfig.projectId || 'fiap-chat-production',
-  storageBucket: rawConfig.storageBucket || 'fiap-chat-production.appspot.com',
-  messagingSenderId: rawConfig.messagingSenderId || '123456789012',
-  appId: rawConfig.appId || '1:123456789012:android:abcdef0123456789',
-};
+/** false enquanto o firebaseConfig.json ainda estiver com os valores de exemplo. */
+export const isFirebaseConfigured = !String(firebaseConfig.apiKey).startsWith('COLE_AQUI');
 
 export const app: FirebaseApp = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 
 let firebaseAuth: Auth;
 try {
+  // Persiste a sessão no AsyncStorage para recuperá-la ao reabrir o app
   firebaseAuth = initializeAuth(app, {
     persistence: getReactNativePersistence(AsyncStorage),
   });
@@ -33,4 +34,9 @@ try {
 export const auth: Auth = firebaseAuth;
 export const db: Firestore = getFirestore(app);
 export const rtdb: Database = getDatabase(app);
-export const storage: FirebaseStorage = getStorage(app);
+
+if (USE_FIREBASE_EMULATORS) {
+  connectAuthEmulator(auth, `http://${FIREBASE_EMULATOR_HOST}:9099`, { disableWarnings: true });
+  connectFirestoreEmulator(db, FIREBASE_EMULATOR_HOST, 8080);
+  connectDatabaseEmulator(rtdb, FIREBASE_EMULATOR_HOST, 9000);
+}
