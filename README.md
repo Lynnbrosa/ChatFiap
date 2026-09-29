@@ -164,10 +164,10 @@ npx eas-cli@latest credentials
 **Tecnologia:** Node.js 22 + Express + TypeScript + Firebase Admin SDK + Expo Server SDK. Código em [`server/`](server/).
 
 ### URL pública
-**URL da API:** `https://PREENCHER-APOS-O-DEPLOY.onrender.com`  
-**Health check:** `https://PREENCHER-APOS-O-DEPLOY.onrender.com/health`
+**URL da API:** https://fiap-chat-notifications-api.onrender.com  
+**Health check:** https://fiap-chat-notifications-api.onrender.com/health
 
-> ⚠️ Depois do deploy, troque as duas linhas acima e coloque a mesma URL em `app.json → expo.extra.notificationsApiUrl`.
+A mesma URL está em `app.json → expo.extra.notificationsApiUrl`, que é usada pelo app.
 
 ### Endpoints
 

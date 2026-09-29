@@ -41,7 +41,7 @@
       ]
     ],
     "extra": {
-      "notificationsApiUrl": ""
+      "notificationsApiUrl": "https://fiap-chat-notifications-api.onrender.com"
     }
   }
 }
