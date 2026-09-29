@@ -27,7 +27,6 @@ Aplicativo de chat em **React Native (Expo) com TypeScript** com conversas **ind
 13. [Testes automatizados com emuladores](#-testes-automatizados-e-emuladores)
 14. [Prints das telas](#-prints-das-telas)
 15. [Evidência de notificação](#-evidência-de-notificação-recebida)
-16. [Publicar no GitHub](#-publicar-no-github)
 
 ---
 
@@ -182,7 +181,7 @@ A mesma URL está em `app.json → expo.extra.notificationsApiUrl`, que é usada
 Erros retornam `{ error, message }` sem detalhes internos.
 
 ### Publicar no Render (passo a passo)
-1. Suba o repositório para o GitHub (seção [Publicar no GitHub](#-publicar-no-github)).
+1. O Render publica a partir do repositório no GitHub: https://github.com/Lynnbrosa/ChatFiap
 2. [render.com](https://render.com) → **New → Blueprint** → selecione o repositório. O [`render.yaml`](render.yaml) já define:
    - Root directory `server`, build `npm ci --include=dev && npm run build`, start `npm start`, health check `/health`.
    - Se preferir sem Blueprint: **New → Web Service** com os mesmos valores.
@@ -429,38 +428,3 @@ Capturados do próprio app rodando ligado aos emuladores do Firebase, com dados 
 |---|---|
 | ![Push](docs/screenshots/13-push-recebido.png) | ![Conversa aberta](docs/screenshots/14-push-abre-conversa.png) |
 -->
-
-## 📤 Publicar no GitHub
-
-1. Crie um repositório **vazio** no GitHub (ex.: `fiap-chat-firebase`), sem README.
-2. Na raiz do projeto, confira que **nenhum segredo** aparece na lista:
-
-```bash
-git status
-```
-
-   Não pode aparecer nenhum `*-firebase-adminsdk-*.json`, `.env` ou `server/.env`.
-
-3. Commit e push:
-
-```bash
-git add .
-```
-
-```bash
-git commit -m "Chat FIAP: correções, regras de segurança, API e README"
-```
-
-```bash
-git branch -M main
-```
-
-```bash
-git remote add origin https://github.com/SEU-USUARIO/fiap-chat-firebase.git
-```
-
-```bash
-git push -u origin main
-```
-
-4. Entrega no Teams: **link do repositório** + **URL pública da API**.
