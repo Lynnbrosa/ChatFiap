@@ -20,7 +20,7 @@
       "predictiveBackGestureEnabled": false,
       "package": "com.fiapchat.app",
       "googleServicesFile": "./google-services.json",
-      "permissions": [
+      "blockedPermissions": [
         "android.permission.RECORD_AUDIO"
       ]
     },
@@ -39,7 +39,8 @@
         "expo-image-picker",
         {
           "photosPermission": "O FIAP Chat acessa suas fotos para você escolher a foto de perfil e a foto dos grupos.",
-          "cameraPermission": "O FIAP Chat usa a câmera para você tirar a foto de perfil e a foto dos grupos."
+          "cameraPermission": "O FIAP Chat usa a câmera para você tirar a foto de perfil e a foto dos grupos.",
+          "microphonePermission": false
         }
       ]
     ],
