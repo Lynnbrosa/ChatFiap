@@ -1,0 +1,73 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Funções auxiliares de autenticação e validação
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return isAuthenticated() && request.auth.uid == uid;
+    }
+
+    // Regras da coleção de usuários
+    match /users/{uid} {
+      // Usuários autenticados podem ler perfis para buscar contatos ou consultar membros
+      allow read: if isAuthenticated();
+      // Somente o próprio usuário pode criar ou alterar seu perfil
+      allow create, update: if isOwner(uid);
+      allow delete: if false;
+
+      // Subcoleção de dispositivos e tokens de push
+      // Os tokens são privados e NUNCA ficam públicos para outros usuários
+      match /devices/{deviceId} {
+        allow read, write: if isOwner(uid);
+      }
+    }
+
+    // Regras de conversas individuais
+    match /directConversations/{conversationId} {
+      // Somente participantes podem ler
+      allow read: if isAuthenticated() && (request.auth.uid in resource.data.participantIds);
+      // Criar conversa com exatamente 2 participantes válidos incluindo o próprio usuário
+      allow create: if isAuthenticated() &&
+                    request.resource.data.participantIds.size() == 2 &&
+                    (request.auth.uid in request.resource.data.participantIds);
+      // Atualizar metadados (como updatedAt ou lastMessage) apenas se for participante
+      allow update: if isAuthenticated() && (request.auth.uid in resource.data.participantIds);
+      allow delete: if false;
+    }
+
+    // Regras de grupos
+    match /groups/{groupId} {
+      // Apenas integrantes ativos podem visualizar as informações do grupo
+      allow read: if isAuthenticated() && (request.auth.uid in resource.data.memberIds);
+
+      // Criação de grupo: proprietário deve ser o usuário autenticado e limite respeitado
+      allow create: if isAuthenticated() &&
+                    request.resource.data.ownerId == request.auth.uid &&
+                    request.resource.data.memberIds.size() >= 2 &&
+                    request.resource.data.memberIds.size() <= request.resource.data.memberLimit &&
+                    (request.auth.uid in request.resource.data.memberIds);
+
+      // Atualização de grupo:
+      // - O proprietário pode atualizar metadados, política, limite e integrantes (desde que não exceda o limite)
+      // - Um integrante pode sair do grupo
+      allow update: if isAuthenticated() &&
+                    request.resource.data.memberIds.size() <= request.resource.data.memberLimit &&
+                    (
+                      resource.data.ownerId == request.auth.uid ||
+                      (request.auth.uid in resource.data.memberIds)
+                    );
+
+      // Somente o proprietário pode excluir o grupo
+      allow delete: if isAuthenticated() && resource.data.ownerId == request.auth.uid;
+    }
+
+    // Registro de mensagens notificadas para garantia de idempotência no backend
+    match /notifiedMessages/{messageId} {
+      allow read, write: if false; // Apenas acessível pelo Firebase Admin SDK na API
+    }
+  }
+}

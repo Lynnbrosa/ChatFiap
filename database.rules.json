@@ -1,0 +1,15 @@
+{
+  "rules": {
+    "messages": {
+      "$conversationId": {
+        // Apenas usuários autenticados podem ler mensagens
+        ".read": "auth != null",
+        "$messageId": {
+          // Apenas o usuário autenticado pode gravar se o senderId for o seu próprio UID
+          ".write": "auth != null && (!data.exists() || data.child('senderId').val() === auth.uid)",
+          ".validate": "newData.hasChildren(['id', 'conversationId', 'conversationType', 'senderId', 'text', 'createdAt']) && newData.child('senderId').val() === auth.uid"
+        }
+      }
+    }
+  }
+}
