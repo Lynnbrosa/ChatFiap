@@ -80,8 +80,6 @@ A API **nunca** recebe lista de destinatários do app: ela calcula no servidor.
 
 O projeto Firebase usado é **`checkpoint2-9fe23`**. A configuração do SDK cliente já está em [`firebaseConfig.json`](firebaseConfig.json), versionada como o enunciado pede. Ela **não** contém credenciais administrativas.
 
-> Status: Authentication (só e-mail/senha), Firestore, Realtime Database e o app Android já estão criados no projeto. Faltam publicar as regras (passo 6), a conta de serviço (7) e o EAS (8).
-
 ### 1. Authentication (e-mail e senha)
 1. Console do Firebase → **Build → Authentication → Get started**.
 2. Aba **Sign-in method** → **Email/Password** → **Enable** → Save.
