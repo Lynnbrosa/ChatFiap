@@ -414,15 +414,8 @@ Capturados do próprio app rodando ligado aos emuladores do Firebase, com dados 
 
 ## 🔔 Evidência de notificação recebida
 
-> ⚠️ **A preencher pela equipe com o APK instalado em celulares reais** (push não funciona em emulador nem na web):
-> 1. Instale o APK em dois celulares e entre com contas diferentes.
-> 2. Com o app do celular B em segundo plano ou fechado, envie uma mensagem pelo celular A.
-> 3. Tire print da notificação no celular B → salve como `docs/screenshots/13-push-recebido.png`.
-> 4. Toque na notificação e tire print do chat aberto → `docs/screenshots/14-push-abre-conversa.png`.
-> 5. Descomente as linhas abaixo.
+Push recebido em **celulares Android reais**, com o APK gerado pelo EAS, em 29/09. As mensagens foram trocadas numa conversa individual, com o app em segundo plano. O fluxo completo passou pela API no Render (`POST /notifications/messages`), pelo Expo Push Service e pelo FCM. O título mostra o nome do remetente (buscado pela API no Firestore) e o corpo mostra a prévia da mensagem.
 
-<!--
-| Push recebido | Toque abre a conversa |
+| Mensagem de Gustavo Oliveira | Mensagem de Giovanne Charelli Zaniboni Silva |
 |---|---|
-| ![Push](docs/screenshots/13-push-recebido.png) | ![Conversa aberta](docs/screenshots/14-push-abre-conversa.png) |
--->
+| ![Push recebido 1](docs/screenshots/13-push-recebido-1.png) | ![Push recebido 2](docs/screenshots/14-push-recebido-2.png) |
